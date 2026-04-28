@@ -92,7 +92,14 @@ const VarA = (function() {
             <option value="365">Last 12 months</option>
             <option value="ytd">Year to date</option>
           </select>
-          <button onClick={() => { setSyncing(true); setTimeout(() => setSyncing(false), 1500); }}
+          <button onClick={async () => {
+              if (syncing) return;
+              setSyncing(true);
+              try {
+                await fetch('/api/sync', { method: 'POST' });
+              } catch (e) { /* ignore */ }
+              window.location.reload();
+            }}
             disabled={syncing}
             style={{
               background: '#3d8c1f', color: 'white', border: 'none',
