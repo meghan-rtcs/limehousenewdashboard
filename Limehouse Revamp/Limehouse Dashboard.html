@@ -38,7 +38,7 @@
   const setMsg = (txt) => { msgEl.textContent = txt; };
   const setErr = (txt) => { bootEl.classList.add('error'); msgEl.textContent = txt; };
 
-  async function fetchData(retries = 20) {
+  async function fetchData(retries = 120) {
     for (let i = 0; i < retries; i++) {
       const res = await fetch('/api/dashboard', { cache: 'no-store' });
       if (res.ok) return res.json();
