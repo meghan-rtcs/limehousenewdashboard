@@ -59,11 +59,11 @@ app.get("/api/sync-status", (req, res) => {
   });
 });
 
-app.use(express.static(STATIC_ROOT, { etag: false, lastModified: false }));
-
 app.get("/", (req, res) => {
-  res.redirect("/Limehouse%20Dashboard.html");
+  res.sendFile(path.join(STATIC_ROOT, "Limehouse Dashboard - A.html"));
 });
+
+app.use(express.static(STATIC_ROOT, { etag: false, lastModified: false }));
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[server] listening on http://0.0.0.0:${PORT}`);
