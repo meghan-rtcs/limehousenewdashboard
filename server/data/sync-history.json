@@ -1,0 +1,12 @@
+[
+  {
+    "ts": "2026-04-28T20:27:28.236Z",
+    "year": 2026,
+    "month": 3,
+    "day": 28,
+    "totalLeases": 548,
+    "paidLeases": 542,
+    "delinquentLeases": 6,
+    "delinquentTotal": 368
+  }
+]

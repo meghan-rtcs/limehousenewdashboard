@@ -5,14 +5,13 @@ A static React dashboard (Babel-in-browser) for Limehouse Property Management, s
 ## Architecture
 
 - **Frontend** (`Limehouse Revamp/`)
-  - `Limehouse Dashboard.html` — full multi-variant comparison view
-  - `Limehouse Dashboard - A.html` — single-variant production view
-  - `components/var-a.jsx`, `var-b.jsx`, `var-c.jsx`, `app.jsx`, `shared.jsx` — React components compiled with `@babel/standalone` in the browser
-  - Each HTML page bootstraps by `fetch()`ing `/api/dashboard`, populating `window.LIMEHOUSE_DATA` and `window.LIMEHOUSE_DRILLDOWNS`, then injecting Babel-compiled `<script>` tags. Each compiled script is wrapped in an IIFE so top-level `const useState = …` declarations don't collide across files.
+  - `Limehouse Dashboard - A.html` — the only entry page (single-variant production view)
+  - `components/var-a.jsx`, `shared.jsx`, `app-a.jsx`, `tweaks-panel.jsx` — React components compiled with `@babel/standalone` in the browser
+  - The HTML bootstraps by `fetch()`ing `/api/dashboard`, populating `window.LIMEHOUSE_DATA` / `LIMEHOUSE_DRILLDOWNS` / `LIMEHOUSE_SYNC`, then injecting Babel-compiled `<script>` tags. Each compiled script is wrapped in an IIFE so top-level `const useState = …` declarations don't collide across files.
   - The header "Sync now" button POSTs to `/api/sync` and reloads.
 
 - **Backend** (`server/`)
-  - `index.js` — Express app, port 5000, serves `Limehouse Revamp/` statically and exposes:
+  - `index.js` — Express app, port 5000. `GET /` sends `Limehouse Dashboard - A.html`; the rest of `Limehouse Revamp/` is served statically. Exposes:
     - `GET /api/dashboard` — full payload (`{ dashboard, drilldowns, sync }`)
     - `POST /api/sync` — forces a refresh
     - `GET /api/sync-status` — `{ fetchedAt, fetching, isStale, lastError, lastErrorAt, ttlMs }`
@@ -20,6 +19,7 @@ A static React dashboard (Babel-in-browser) for Limehouse Property Management, s
   - `lib/buildium.js` — Buildium v1 REST client (`x-buildium-client-id` / `x-buildium-client-secret` headers, `limit`/`offset` pagination)
   - `lib/rentengine.js` — RentEngine public v1 client (`Authorization: Bearer …`, `limit` + `page_number` pagination, max 100 per page; handles bare-array and `{data, page}` envelope responses)
   - `lib/aggregator.js` — pulls from both APIs in parallel and produces the dashboard shape consumed by the frontend
+  - `lib/history.js` — JSON-file persistence (`server/data/sync-history.json`) of one snapshot per (year, month, day) capturing `{totalLeases, paidLeases, delinquentLeases, delinquentTotal}`. Used to derive "Rent by 3rd / 10th" — for each calendar month with a snapshot whose `dayOfMonth ≤ N`, we treat the latest such snapshot as the "by day N" observation and average the % paid across the trailing 6 months.
 
 ## Data Sources
 
@@ -33,8 +33,15 @@ A static React dashboard (Babel-in-browser) for Limehouse Property Management, s
 | New prospects, source breakdown | RentEngine `/prospects?created_after=&created_before=` | |
 | Applications submitted | RentEngine `/rental_application_groups?created_after=&created_before=` | Returns paginated envelope |
 | Units on market | RentEngine `/units` filtered by `status` | |
+| Avg / median days on market | RentEngine `/units` (created_at) | Days since `created_at` for units where `!is_occupied` and `status` is Available/Listed |
+| Rent by 3rd / 10th | Sync-history snapshots (`server/data/sync-history.json`) | Each successful sync records `{paidLeases, totalLeases}`. Tile = avg paid% across the latest snapshot of each of the last 6 months whose dayOfMonth ≤ N. Empty/zero until snapshots accumulate across months. |
+| Renewal rate / count | Buildium `/leases` (all statuses) + `/leases/tenants` | Detects consecutive leases on the same unit where the new lease starts within −30..+60 days of the previous one's end and shares a tenant identity (matched by lowercased email, falling back to name+DOB). Rate = renewals / leases that ended in the period. |
+| Evictions pending | Buildium active leases (`IsEvictionPending`) | |
+| Vacant rented | Buildium `/leases?statuses=Future` | Units not in active-lease set with a Future lease whose `LeaseFromDate > today` |
+| Avg days vacant | Buildium past leases (`MoveOutData[].MoveOutDate` / `LeaseToDate`) | For each currently-vacant unit, days since the most recent past-lease end |
+| Doors lost / Owners gained | Buildium `/rentals/owners` (`ManagementAgreementStartDate` / `EndDate`) | Owners with start/end in the last 12 months; doors lost = sum of units belonging to properties of owners whose end date is in window |
 
-Metrics with no derivable source (rent-by-3rd, rent-by-10th, days on market, showings, calls, texts, evictions, renewal rate, rent-increase distribution) intentionally return `0` rather than mock values, per the project requirement that no mock data exist anywhere.
+Metrics that still return `0` because no derivable source exists in the live API responses: showings, calls, texts, rent-increase distribution. Some date-driven metrics may also legitimately read `0` (e.g. owners gained = 0 when all populated `ManagementAgreementStartDate` values are older than 12 months) — those are real, not placeholder.
 
 ## Caching & Refresh
 
@@ -60,4 +67,6 @@ Postgres env vars (`DATABASE_URL`, `PG*`) are present but unused by this app.
 ## Notes
 
 - Mock data has been removed entirely. The previous `Limehouse Revamp/data/mock-data.js` and `data/drilldowns.js` were deleted.
+- The multi-variant comparison page and B/C variants have been removed; only the single-variant A page is exposed.
 - The OpenAPI spec for RentEngine lives at `attached_assets/openapi_1777396695311.json` (kept as a reference).
+- `server/data/sync-history.json` accumulates one snapshot per UTC day. It must persist across deploys for the "Rent by Nth" tiles to backfill — keep deploying as a VM (filesystem persistence) rather than autoscale.
