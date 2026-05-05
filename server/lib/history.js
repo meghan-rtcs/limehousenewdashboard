@@ -54,35 +54,53 @@ export function getHistory() {
   return load();
 }
 
+// Grace window after the target day. A snapshot taken on day D measures
+// "% paid by day D"; we need D >= N (so day N has actually elapsed) and
+// allow D up to N + GRACE so a snapshot a few days later still counts as
+// the "by day N" observation if no exact-day snapshot exists.
+const GRACE_DAYS = 5;
+
+function bestSnapshotForMonth(entries, year, month, N) {
+  let best = null;
+  for (const e of entries) {
+    if (e.year !== year || e.month !== month) continue;
+    if (!e.totalLeases || !Number.isFinite(e.paidLeases)) continue;
+    if (e.day < N || e.day > N + GRACE_DAYS) continue;
+    // Prefer the snapshot taken closest to (and not before) day N.
+    if (!best || e.day < best.day) best = e;
+  }
+  return best;
+}
+
 // "% of leases paid in full by day N of the month".
-// For each calendar month within the window, we take the latest snapshot whose
-// dayOfMonth <= N (the closest-to-deadline observation we have for that month)
-// and compute paidLeases / totalLeases. Then we average across months.
+// For each calendar month within the window, we take the snapshot taken on
+// day N (or within GRACE_DAYS after) and compute paidLeases / totalLeases.
+// Then we average across months that have such a snapshot.
 export function rentCollectedByDay(N, monthsBack = 6) {
   const entries = load();
   const now = new Date();
-  const cutoff = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - monthsBack, 1)
-  );
-  const byMonth = new Map();
-  for (const e of entries) {
-    if (!e.totalLeases || !Number.isFinite(e.paidLeases)) continue;
-    if (new Date(e.ts) < cutoff) continue;
-    if (e.day > N) continue;
-    const key = `${e.year}-${e.month}`;
-    const cur = byMonth.get(key);
-    if (!cur || e.day > cur.day) byMonth.set(key, e);
+  const months = [];
+  for (let i = 0; i < monthsBack; i++) {
+    const target = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1)
+    );
+    months.push({ year: target.getUTCFullYear(), month: target.getUTCMonth() });
   }
-  if (byMonth.size === 0) return { value: 0, monthsCounted: 0, sample: 0 };
   let totalPaid = 0;
   let totalLeases = 0;
-  for (const e of byMonth.values()) {
-    totalPaid += e.paidLeases;
-    totalLeases += e.totalLeases;
+  let monthsCounted = 0;
+  for (const { year, month } of months) {
+    const best = bestSnapshotForMonth(entries, year, month, N);
+    if (!best) continue;
+    totalPaid += best.paidLeases;
+    totalLeases += best.totalLeases;
+    monthsCounted += 1;
   }
+  if (!monthsCounted || !totalLeases)
+    return { value: 0, monthsCounted: 0, sample: 0 };
   return {
     value: Math.round((totalPaid / totalLeases) * 1000) / 10,
-    monthsCounted: byMonth.size,
+    monthsCounted,
     sample: totalLeases,
   };
 }
@@ -99,13 +117,7 @@ export function rentCollectedSeries(N, monthsBack = 12) {
     );
     const month = target.getUTCMonth();
     const year = target.getUTCFullYear();
-    let best = null;
-    for (const e of entries) {
-      if (e.year !== year || e.month !== month) continue;
-      if (e.day > N) continue;
-      if (!e.totalLeases) continue;
-      if (!best || e.day > best.day) best = e;
-    }
+    const best = bestSnapshotForMonth(entries, year, month, N);
     out.push({
       year,
       month,
