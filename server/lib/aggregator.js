@@ -52,7 +52,7 @@ export async function buildDashboard() {
   const months = last12Months(now);
   const yearAgoFrom = months[0].from;
 
-  const [
+  let [
     bdUnits,
     bdProperties,
     bdActiveLeases,
@@ -114,6 +114,22 @@ export async function buildDashboard() {
     : [];
 
   // ── meta ──────────────────────────────────────────────────────────────────
+  // Restrict the entire portfolio to active (still-managed) properties.
+  // Buildium keeps off-boarded properties + their units + their stale leases
+  // in the API responses with `Property.IsActive=false`; counting them would
+  // inflate vacancy and skew lease/financial metrics.
+  const activePropertyIds = new Set(
+    bdProperties.filter((p) => p.IsActive !== false).map((p) => p.Id)
+  );
+  const inActiveProp = (x) => activePropertyIds.has(x.PropertyId);
+  bdUnits = bdUnits.filter(inActiveProp);
+  const activeUnitIds = new Set(bdUnits.map((u) => u.Id));
+  const inActiveUnit = (l) => activeUnitIds.has(l.UnitId ?? l.Unit?.Id);
+  bdActiveLeases = bdActiveLeases.filter(inActiveUnit);
+  bdAllLeases = bdAllLeases.filter(inActiveUnit);
+  bdRenewals = bdRenewals.filter(
+    (r) => !r.UnitId || activeUnitIds.has(r.UnitId)
+  );
   const totalUnits = bdUnits.length;
   const activeLeases = bdActiveLeases.length;
   const meta = {

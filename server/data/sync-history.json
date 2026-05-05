@@ -20,13 +20,13 @@
     "delinquentTotal": 368
   },
   {
-    "ts": "2026-05-05T16:41:53.219Z",
+    "ts": "2026-05-05T17:35:12.787Z",
     "year": 2026,
     "month": 4,
     "day": 5,
-    "totalLeases": 548,
-    "paidLeases": 528,
-    "delinquentLeases": 20,
-    "delinquentTotal": 27933
+    "totalLeases": 393,
+    "paidLeases": 374,
+    "delinquentLeases": 19,
+    "delinquentTotal": 27742
   }
 ]
