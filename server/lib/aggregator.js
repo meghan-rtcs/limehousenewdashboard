@@ -596,24 +596,39 @@ export async function buildDashboard() {
       ]),
       summary: `${ownersGainedList.length} owners`,
     },
-    avgDaysVacant: {
-      title: "Currently vacant units",
-      cols: ["Unit", "Property", "Vacant since", "Days"],
-      rows: bdUnits
-        .filter((u) => !occupiedUnitIds.has(u.Id) && pastLeasesByUnit.has(u.Id))
-        .slice(0, 200)
-        .map((u) => {
+    avgDaysVacant: (() => {
+      const vacantUnitsList = bdUnits.filter((u) => !occupiedUnitIds.has(u.Id));
+      const withHistory = vacantUnitsList.filter((u) => pastLeasesByUnit.has(u.Id));
+      const noHistory = vacantUnitsList.filter((u) => !pastLeasesByUnit.has(u.Id));
+      const rows = [
+        ...withHistory.map((u) => {
           const since = pastLeasesByUnit.get(u.Id);
           const days = Math.floor((now - new Date(since)) / (1000 * 60 * 60 * 24));
           return [
             String(u.UnitNumber || u.Id),
-            String(u.BuildingName || u.PropertyId || "—"),
+            String(u.BuildingName || propName(u.PropertyId)),
             since,
             String(days),
           ];
         }),
-      summary: `${vacantDays.length} vacant units · avg ${avgDaysVacant} days`,
-    },
+        ...noHistory.map((u) => [
+          String(u.UnitNumber || u.Id),
+          String(u.BuildingName || propName(u.PropertyId)),
+          "no prior lease in Buildium",
+          "—",
+        ]),
+      ];
+      const summary =
+        withHistory.length === 0
+          ? `Avg = 0 because none of the ${vacantUnitsList.length} currently-vacant units have a prior lease in Buildium (likely never leased through this account)`
+          : `${withHistory.length} of ${vacantUnitsList.length} vacant units have lease history · avg ${avgDaysVacant} days for those`;
+      return {
+        title: "Currently vacant units",
+        cols: ["Unit", "Property", "Vacant since", "Days"],
+        rows: rows.slice(0, 500),
+        summary,
+      };
+    })(),
     avgDaysOnMarket: {
       title: "Units currently on market",
       cols: ["Unit ID", "Status", "Listed since", "Days"],
