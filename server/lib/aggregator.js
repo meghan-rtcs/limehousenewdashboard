@@ -61,6 +61,7 @@ export async function buildDashboard() {
     bdOwners,
     bdGLAccounts,
     bdTenants,
+    bdRenewals,
     reUnits,
     reProspects,
     reAppGroups,
@@ -73,6 +74,7 @@ export async function buildDashboard() {
     safe(buildium.listOwners(), []),
     safe(buildium.listGLAccounts(), []),
     safe(buildium.listTenants(), []),
+    safe(buildium.listLeaseRenewals(), []),
     safe(rentengine.listUnits(), []),
     safe(rentengine.listProspects(yearAgoFrom, now.toISOString()), []),
     safe(
@@ -302,58 +304,40 @@ export async function buildDashboard() {
     /move|approved/i.test(g.status || "")
   ).length;
 
-  // Renewals: detect by consecutive leases on the same unit that share at least
-  // one tenant, where the new lease starts within 60 days of the previous one's end.
-  const leasesByUnit = new Map();
-  for (const l of bdAllLeases) {
-    const uid = l.UnitId ?? l.Unit?.Id;
-    if (!uid || !l.LeaseFromDate) continue;
-    if (!leasesByUnit.has(uid)) leasesByUnit.set(uid, []);
-    leasesByUnit.get(uid).push(l);
-  }
-  let renewalsInWindow = 0;
-  let endedInWindow = 0;
-  const renewalDetails = [];
-  for (const [, leases] of leasesByUnit) {
-    leases.sort((a, b) => a.LeaseFromDate.localeCompare(b.LeaseFromDate));
-    for (let i = 1; i < leases.length; i++) {
-      const prev = leases[i - 1];
-      const curr = leases[i];
-      if (!prev.LeaseToDate || !curr.LeaseFromDate) continue;
-      const gapDays = Math.round(
-        (new Date(curr.LeaseFromDate) - new Date(prev.LeaseToDate)) /
-          (1000 * 60 * 60 * 24)
-      );
-      const prevTenantKeys = new Set(
-        (prev.Tenants || [])
-          .map((t) => tenantKey.get(t.Id))
-          .filter(Boolean)
-      );
-      const sharedTenant = (curr.Tenants || []).some((t) => {
-        const k = tenantKey.get(t.Id);
-        return k && prevTenantKeys.has(k);
-      });
-      const isRenewal = sharedTenant && gapDays >= -30 && gapDays <= 60;
-      const endedInPeriod = prev.LeaseToDate >= yearAgoIso;
-      if (endedInPeriod) endedInWindow += 1;
-      // Count the renewal against the same window the denominator uses
-      // (the previous lease ended in the trailing 12 months).
-      if (isRenewal && endedInPeriod) {
-        renewalsInWindow += 1;
-        renewalDetails.push({ prev, curr });
-      }
-    }
-  }
-  const renewalRate = endedInWindow
-    ? Math.round((renewalsInWindow / endedInWindow) * 1000) / 10
+  // Renewals: use Buildium's /leases/renewals endpoint directly. Each renewal
+  // record is a renewal lease with its own LeaseFromDate. Limehouse handles
+  // renewals via Buildium's renewal-offer workflow rather than by creating a
+  // brand-new lease record on the same unit, so consecutive-lease heuristics
+  // miss them entirely.
+  const renewalsRecent = bdRenewals.filter(
+    (r) => r.LeaseFromDate && r.LeaseFromDate >= yearAgoIso
+  );
+  const renewalsInWindow = renewalsRecent.length;
+
+  // Denominator: total "lease-end events" in the trailing 12 months — past
+  // leases whose LeaseToDate fell in the window plus renewals (which prevented
+  // an end). This gives renewal rate = renewed / (renewed + churned).
+  const churnedInWindow = bdAllLeases.filter(
+    (l) =>
+      l.LeaseStatus === "Past" &&
+      l.LeaseToDate &&
+      l.LeaseToDate >= yearAgoIso &&
+      l.LeaseToDate <= todayIso
+  ).length;
+  const renewalDenominator = renewalsInWindow + churnedInWindow;
+  const renewalRate = renewalDenominator
+    ? Math.round((renewalsInWindow / renewalDenominator) * 1000) / 10
     : 0;
 
   // Renewals per month for sparkline / chart
   const renewalsByMonthCount = months.map(() => 0);
-  for (const { curr } of renewalDetails) {
-    const idx = months.findIndex((m) => m.key === monthKey(new Date(curr.LeaseFromDate)));
+  for (const r of renewalsRecent) {
+    const idx = months.findIndex(
+      (m) => m.key === monthKey(new Date(r.LeaseFromDate))
+    );
     if (idx >= 0) renewalsByMonthCount[idx] += 1;
   }
+  const renewalDetails = renewalsRecent.map((r) => ({ curr: r }));
 
   const evictionsPendingCount = bdActiveLeases.filter((l) => l.IsEvictionPending).length;
 
@@ -578,14 +562,15 @@ export async function buildDashboard() {
     },
     renewalsCount: {
       title: "Lease renewals (last 12 months)",
-      cols: ["Unit", "Tenant ID", "Previous ended", "Renewed from"],
-      rows: renewalDetails.slice(0, 200).map(({ prev, curr }) => [
-        String(curr.UnitNumber || curr.UnitId || "—"),
-        String((curr.Tenants || [])[0]?.Id || "—"),
-        prev.LeaseToDate || "—",
-        curr.LeaseFromDate || "—",
+      cols: ["Lease ID", "Status", "Renewed from", "Renewed to", "Rent"],
+      rows: renewalsRecent.slice(0, 200).map((r) => [
+        String(r.Id || "—"),
+        r.LeaseStatus || "—",
+        r.LeaseFromDate || "—",
+        r.LeaseToDate || "—",
+        r.Rent != null ? `$${Math.round(r.Rent)}` : "—",
       ]),
-      summary: `${renewalsInWindow} renewals · ${renewalRate}% rate (${endedInWindow} leases ended)`,
+      summary: `${renewalsInWindow} renewals · ${renewalRate}% rate (${churnedInWindow} leases ended)`,
     },
     evictionsPending: {
       title: "Evictions pending",

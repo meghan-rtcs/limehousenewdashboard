@@ -52,6 +52,14 @@ export const buildium = {
   listTenants: () => listAll("/leases/tenants"),
   listGLAccounts: () => listAll("/glaccounts", {}, { pageSize: 200, max: 1000 }),
   listGLTransactions: (params) => listAll("/generalledger/transactions", params, { pageSize: 1000, max: 100000 }),
-  listLeaseRenewals: (params) => listAll("/leases/renewals", params),
+  // Buildium requires the `esignaturestatuses` filter; "NotSent" + "Cancelled"
+  // are the only enum values the account accepts and together cover every
+  // renewal record regardless of e-sign workflow.
+  listLeaseRenewals: () =>
+    listAll(
+      "/leases/renewals",
+      { esignaturestatuses: ["NotSent", "Cancelled"] },
+      { pageSize: 1000, max: 50000 }
+    ),
   raw: request,
 };
