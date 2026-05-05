@@ -646,5 +646,368 @@ export async function buildDashboard() {
     },
   };
 
+  // ── extended drilldowns: one per tile ─────────────────────────────────────
+  const propertyById = new Map(bdProperties.map((p) => [p.Id, p]));
+  const propName = (pid) =>
+    propertyById.get(pid)?.Name || propertyById.get(pid)?.Address?.AddressLine1 || `#${pid || "—"}`;
+  const unitLabel = (u) =>
+    `${u.BuildingName || u.Address?.AddressLine1 || propName(u.PropertyId)}${u.UnitNumber ? " · " + u.UnitNumber : ""}`;
+
+  // Active leases sorted by rent (descending)
+  const activeLeasesSorted = [...bdActiveLeases].sort(
+    (a, b) =>
+      Number(b.AccountDetails?.Rent ?? 0) - Number(a.AccountDetails?.Rent ?? 0)
+  );
+
+  const notWired = (title, reason) => ({
+    title,
+    cols: ["Note"],
+    rows: [[reason]],
+    summary: "No data source available yet",
+  });
+
+  Object.assign(drilldowns, {
+    occupancy: {
+      title: "Occupied units",
+      cols: ["Lease ID", "Property", "Unit", "Tenant", "Rent"],
+      rows: activeLeasesSorted.slice(0, 500).map((l) => [
+        String(l.Id),
+        propName(l.PropertyId),
+        String(l.UnitNumber || l.UnitId || "—"),
+        (l.CurrentTenants || [])
+          .map((t) => `${t.FirstName || ""} ${t.LastName || ""}`.trim())
+          .filter(Boolean)
+          .join(", ") || "—",
+        l.AccountDetails?.Rent != null
+          ? `$${Math.round(l.AccountDetails.Rent).toLocaleString()}`
+          : "—",
+      ]),
+      summary: `${occupiedUnits} occupied of ${totalUnits} units · ${pct(occupiedUnits, totalUnits)}%`,
+    },
+    renewalRate: {
+      title: "Lease renewals (last 12 months)",
+      cols: ["Lease ID", "Status", "Renewed from", "Renewed to", "Rent"],
+      rows: renewalsRecent.slice(0, 200).map((r) => [
+        String(r.Id || "—"),
+        r.LeaseStatus || "—",
+        r.LeaseFromDate || "—",
+        r.LeaseToDate || "—",
+        r.Rent != null ? `$${Math.round(r.Rent)}` : "—",
+      ]),
+      summary: `${renewalsInWindow} renewals · ${renewalRate}% rate (${churnedInWindow} leases ended)`,
+    },
+    netDoors: {
+      title: "Net door change (last 12 months)",
+      cols: ["Direction", "Owner", "Date", "Units"],
+      rows: [
+        ...ownersGainedList.map((o) => [
+          "Gained",
+          o.CompanyName || `${o.FirstName || ""} ${o.LastName || ""}`.trim() || "—",
+          o.ManagementAgreementStartDate || "—",
+          String((o.PropertyIds || []).length),
+        ]),
+        ...ownersLostList.map((o) => {
+          const propIds = new Set(o.PropertyIds || []);
+          const u = bdUnits.filter((x) => propIds.has(x.PropertyId)).length;
+          return [
+            "Lost",
+            o.CompanyName || `${o.FirstName || ""} ${o.LastName || ""}`.trim() || "—",
+            o.ManagementAgreementEndDate || "—",
+            String(u),
+          ];
+        }),
+      ],
+      summary: `+${doorsAdded} added · −${doorsLost} lost · net ${netDoors >= 0 ? "+" : ""}${netDoors}`,
+    },
+
+    // ── financials ──
+    rentCollectedBy3rd: {
+      title: "Rent collection — by 3rd of month",
+      cols: ["Month", "Snapshot day", "Paid", "Total", "% paid"],
+      rows: by3rdSeries.map((s) => [
+        `${MONTH_LABELS[s.month]} ${s.year}`,
+        s.hasData ? "✓" : "no snapshot in window",
+        s.hasData ? "—" : "—",
+        s.hasData ? "—" : "—",
+        s.hasData ? `${s.pct}%` : "—",
+      ]),
+      summary: `${by3rd.value}% avg over ${by3rd.monthsCounted} month${by3rd.monthsCounted === 1 ? "" : "s"} with snapshots`,
+    },
+    rentCollectedBy10th: {
+      title: "Rent collection — by 10th of month",
+      cols: ["Month", "Snapshot day", "% paid"],
+      rows: by10thSeries.map((s) => [
+        `${MONTH_LABELS[s.month]} ${s.year}`,
+        s.hasData ? "captured" : "no snapshot in window",
+        s.hasData ? `${s.pct}%` : "—",
+      ]),
+      summary: `${by10th.value}% avg over ${by10th.monthsCounted} month${by10th.monthsCounted === 1 ? "" : "s"} with snapshots`,
+    },
+    avgRentPerDoor: {
+      title: "Active leases by rent",
+      cols: ["Lease ID", "Property", "Unit", "Rent"],
+      rows: activeLeasesSorted.slice(0, 500).map((l) => [
+        String(l.Id),
+        propName(l.PropertyId),
+        String(l.UnitNumber || l.UnitId || "—"),
+        l.AccountDetails?.Rent != null
+          ? `$${Math.round(l.AccountDetails.Rent).toLocaleString()}`
+          : "—",
+      ]),
+      summary: `Avg $${avgRentPerDoor.toLocaleString()} across ${monthlyRent.length} active leases`,
+    },
+    rpu: {
+      title: "Revenue per unit (annualized rent / total units)",
+      cols: ["Lease ID", "Property", "Unit", "Annualized"],
+      rows: activeLeasesSorted.slice(0, 500).map((l) => {
+        const r = Number(l.AccountDetails?.Rent ?? 0);
+        return [
+          String(l.Id),
+          propName(l.PropertyId),
+          String(l.UnitNumber || l.UnitId || "—"),
+          r ? `$${(r * 12).toLocaleString()}` : "—",
+        ];
+      }),
+      summary: `$${Math.round(totalRentPotential / Math.max(totalUnits, 1)).toLocaleString()}/unit annualized rent potential`,
+    },
+    grossIncome: {
+      title: "Gross income by month (last 12)",
+      cols: ["Month", "Gross ($k)"],
+      rows: incomeByMonth.map((m) => [m.month, `$${m.gross}k`]),
+      summary: `$${grossIncomeTotal}k total gross income`,
+    },
+    netIncome: {
+      title: "Net income by month (last 12)",
+      cols: ["Month", "Gross ($k)", "Net ($k)"],
+      rows: incomeByMonth.map((m) => [m.month, `$${m.gross}k`, `$${m.net}k`]),
+      summary: `$${netIncomeTotal}k total net income`,
+    },
+
+    // ── occupancy ──
+    totalUnits: {
+      title: "All units",
+      cols: ["Unit ID", "Property", "Unit", "Bed/Bath", "Listed?"],
+      rows: bdUnits.slice(0, 500).map((u) => [
+        String(u.Id),
+        propName(u.PropertyId),
+        String(u.UnitNumber || "—"),
+        `${u.UnitBedrooms || "—"} / ${u.UnitBathrooms || "—"}`,
+        u.IsUnitListed ? "yes" : "no",
+      ]),
+      summary: `${totalUnits} total units across ${bdProperties.length} properties`,
+    },
+    vacantNotRented: {
+      title: "Vacant units (no future lease)",
+      cols: ["Unit ID", "Property", "Unit", "Market rent"],
+      rows: bdUnits
+        .filter(
+          (u) => !occupiedUnitIds.has(u.Id) && !vacantRentedUnitIds.has(u.Id)
+        )
+        .slice(0, 500)
+        .map((u) => [
+          String(u.Id),
+          propName(u.PropertyId),
+          String(u.UnitNumber || "—"),
+          u.MarketRent != null
+            ? `$${Math.round(u.MarketRent).toLocaleString()}`
+            : "—",
+        ]),
+      summary: `${vacantNotRentedCount} vacant, no future lease`,
+    },
+    vacantRented: {
+      title: "Vacant units with a future lease",
+      cols: ["Unit ID", "Property", "Unit", "Move-in date", "Rent"],
+      rows: futureLeases
+        .filter((l) => vacantRentedUnitIds.has(l.UnitId))
+        .slice(0, 200)
+        .map((l) => [
+          String(l.UnitId),
+          propName(l.PropertyId),
+          String(l.UnitNumber || "—"),
+          l.LeaseFromDate || "—",
+          l.AccountDetails?.Rent != null
+            ? `$${Math.round(l.AccountDetails.Rent).toLocaleString()}`
+            : "—",
+        ]),
+      summary: `${vacantRentedCount} units pre-leased`,
+    },
+    doorsAdded: {
+      title: "Doors added (owners gained, last 12 months)",
+      cols: ["Owner", "Start date", "Units"],
+      rows: ownersGainedList.slice(0, 200).map((o) => {
+        const propIds = new Set(o.PropertyIds || []);
+        const u = bdUnits.filter((x) => propIds.has(x.PropertyId)).length;
+        return [
+          o.CompanyName || `${o.FirstName || ""} ${o.LastName || ""}`.trim() || "—",
+          o.ManagementAgreementStartDate || "—",
+          String(u),
+        ];
+      }),
+      summary: `+${doorsAdded} doors across ${ownersGainedList.length} owners`,
+    },
+    ownersTotal: {
+      title: "All owners",
+      cols: ["Owner", "Properties", "Agreement start", "Agreement end"],
+      rows: bdOwners.slice(0, 500).map((o) => [
+        o.CompanyName || `${o.FirstName || ""} ${o.LastName || ""}`.trim() || "—",
+        String((o.PropertyIds || []).length),
+        o.ManagementAgreementStartDate || "—",
+        o.ManagementAgreementEndDate || "—",
+      ]),
+      summary: `${bdOwners.length} owners total`,
+    },
+
+    // ── leasing ──
+    fixedLeases: {
+      title: "Fixed-term active leases",
+      cols: ["Lease ID", "Property", "Unit", "From", "To"],
+      rows: bdActiveLeases
+        .filter((l) => (l.LeaseType || "").toLowerCase().includes("fixed"))
+        .slice(0, 500)
+        .map((l) => [
+          String(l.Id),
+          propName(l.PropertyId),
+          String(l.UnitNumber || "—"),
+          l.LeaseFromDate || "—",
+          l.LeaseToDate || "—",
+        ]),
+      summary: `${fixedLeases} fixed-term leases`,
+    },
+    mtmLeases: {
+      title: "Month-to-month active leases",
+      cols: ["Lease ID", "Property", "Unit", "Started"],
+      rows: bdActiveLeases
+        .filter((l) => {
+          const t = (l.LeaseType || "").toLowerCase();
+          return t.includes("month") || t === "atwill";
+        })
+        .slice(0, 500)
+        .map((l) => [
+          String(l.Id),
+          propName(l.PropertyId),
+          String(l.UnitNumber || "—"),
+          l.LeaseFromDate || "—",
+        ]),
+      summary: `${mtmLeases} MTM leases`,
+    },
+    moveins: {
+      title: "Move-ins (approved/moved applications)",
+      cols: ["Group ID", "Status", "Unit", "Created"],
+      rows: reAppGroups
+        .filter((g) => /move|approved/i.test(g.status || ""))
+        .slice(-200)
+        .reverse()
+        .map((g) => [
+          String(g.id || g.group_id || ""),
+          g.status || "—",
+          String(g.unit_id || g.unit?.id || "—"),
+          (g.created_at || "").slice(0, 10),
+        ]),
+      summary: `${moveins} move-ins from ${appsSubmitted} applications`,
+    },
+    appsPerMovein: {
+      title: "Applications-to-move-in funnel",
+      cols: ["Stage", "Count"],
+      rows: [
+        ["Applications submitted", String(appsSubmitted)],
+        ["Move-ins / approvals", String(moveins)],
+        ["Apps per move-in", moveins ? (appsSubmitted / moveins).toFixed(1) : "—"],
+      ],
+      summary: `${moveins ? (appsSubmitted / moveins).toFixed(1) : "—"} applications per move-in`,
+    },
+
+    // ── marketing ──
+    medianDaysOnMarket: {
+      title: "Units currently on market (by days listed)",
+      cols: ["Unit ID", "Status", "Listed since", "Days"],
+      rows: reAvailable
+        .map((u) => ({
+          u,
+          days: u.created_at
+            ? Math.floor((now - new Date(u.created_at)) / (1000 * 60 * 60 * 24))
+            : 0,
+        }))
+        .sort((a, b) => a.days - b.days)
+        .map(({ u, days }) => [
+          String(u.id),
+          u.status || "—",
+          (u.created_at || "").slice(0, 10),
+          String(days),
+        ]),
+      summary: `Median ${medianDaysOnMarket} days · avg ${avgDaysOnMarket} days · ${unitsOnMarket} listed`,
+    },
+    unitsOnMarket: {
+      title: "Units currently on market",
+      cols: ["Unit ID", "Status", "Listed since", "Days"],
+      rows: reAvailable.slice(0, 200).map((u) => {
+        const days = u.created_at
+          ? Math.floor((now - new Date(u.created_at)) / (1000 * 60 * 60 * 24))
+          : 0;
+        return [
+          String(u.id),
+          u.status || "—",
+          (u.created_at || "").slice(0, 10),
+          String(days),
+        ];
+      }),
+      summary: `${unitsOnMarket} units listed`,
+    },
+    completionRate: notWired(
+      "Showing completion rate",
+      "RentEngine's public API doesn't expose showing events, so this metric will read 0 until a Meld or call/text source is connected."
+    ),
+    showingsCompleted: notWired(
+      "Showings completed",
+      "RentEngine's public API doesn't expose showing events. Connect Meld or another source to populate."
+    ),
+    totalCalls: notWired(
+      "Total calls",
+      "No call/voice integration is wired yet. Connect a phone source (e.g. CallRail, OpenPhone) to populate."
+    ),
+    totalTexts: notWired(
+      "Outbound texts",
+      "No SMS integration is wired yet. Connect a messaging source to populate."
+    ),
+  });
+
+  // ── live-metrics flag — drill keys backed by real, live API data ──────────
+  const liveMetrics = [
+    // financials
+    "delinquent",
+    "delinquentCount",
+    "rentCollectedBy3rd",
+    "rentCollectedBy10th",
+    "avgRentPerDoor",
+    "rpu",
+    "grossIncome",
+    "netIncome",
+    // occupancy
+    "occupancy",
+    "totalUnits",
+    "vacantNotRented",
+    "vacantRented",
+    "avgDaysVacant",
+    "doorsAdded",
+    "doorsLost",
+    "netDoors",
+    "ownersTotal",
+    "ownersGained",
+    // leasing
+    "renewalRate",
+    "renewalsCount",
+    "fixedLeases",
+    "mtmLeases",
+    "appsSubmitted",
+    "moveins",
+    "appsPerMovein",
+    "evictionsPending",
+    // marketing
+    "avgDaysOnMarket",
+    "medianDaysOnMarket",
+    "unitsOnMarket",
+    "newProspects",
+  ];
+  meta.liveMetrics = liveMetrics;
+
   return { dashboard, drilldowns };
 }

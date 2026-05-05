@@ -117,8 +117,24 @@ const VarA = (function() {
     );
   }
 
+  // Small green LIVE badge — shown next to source pill when the metric is
+  // backed by real, fresh API data (vs a placeholder waiting on a data source).
+  function LiveBadge() {
+    return (
+      <span title="Backed by live API data" style={{
+        display: 'inline-flex', alignItems: 'center', gap: 3,
+        fontSize: 8.5, fontWeight: 700, letterSpacing: '0.05em',
+        color: '#2f7d1a', background: 'rgba(61,140,31,0.10)',
+        padding: '1px 5px', borderRadius: 3, lineHeight: 1.3,
+      }}>
+        <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#3d8c1f', display: 'inline-block' }} />
+        LIVE
+      </span>
+    );
+  }
+
   // KPI tile — every tile is now drillable (cursor + hover)
-  function KPI({ label, value, unit, delta, spark, sparkColor, source, onClick, big = false, mobile, showSource, accent }) {
+  function KPI({ label, value, unit, delta, spark, sparkColor, source, onClick, big = false, mobile, showSource, accent, live }) {
     const accentColor = accent === 'red' ? '#c0392b' : (accent === 'green' ? '#3d8c1f' : (accent === 'blue' ? '#2471a3' : '#1c2119'));
     return (
       <div onClick={onClick} style={{
@@ -139,6 +155,7 @@ const VarA = (function() {
             textTransform: 'uppercase', color: '#9aa595', lineHeight: 1.3,
           }}>{label}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            {live && <LiveBadge />}
             <SourcePill source={source} show={showSource} />
             {onClick && <span style={{ fontSize: 11, color: '#cbd1c4', lineHeight: 1 }}>›</span>}
           </div>
@@ -197,6 +214,12 @@ const VarA = (function() {
     // Recompute scaled data whenever the range changes
     const { data: SD, range: rangeMeta } = useMemo(() => scaleData(range), [range]);
 
+    // Set of drill keys that are backed by real, live API data
+    const liveSet = useMemo(
+      () => new Set(SD.meta?.liveMetrics || []),
+      [SD]
+    );
+
     // Helper to assemble KPI props from data + drill key
     const k = (label, source, valueObj, unit, sparkKey, sparkColor, big, accent, drillId) => ({
       label, source, value: valueObj.value, unit: unit ?? valueObj.unit,
@@ -204,6 +227,7 @@ const VarA = (function() {
       spark: sparkKey ? SD.spark[sparkKey] : null,
       sparkColor, big, accent,
       onClick: drillId ? () => setDrillKey(drillId) : undefined,
+      live: drillId ? liveSet.has(drillId) : false,
     });
 
     const healthColors = { 'Healthy':'#3d8c1f','At-risk':'#d68910','Waitlist':'#7d3c98','On Hold':'#2471a3','Off-Market':'#aab5a3' };
@@ -257,6 +281,7 @@ const VarA = (function() {
               spark={SD.spark.doorsAdded.map((a, i) => a - SD.spark.doorsLost[i])}
               sparkColor="#3d8c1f"
               big mobile={mobile} showSource={showSource} accent="green"
+              live={liveSet.has('netDoors')}
               onClick={() => setDrillKey('netDoors')} />
           </div>
 
