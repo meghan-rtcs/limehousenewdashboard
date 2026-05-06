@@ -36,7 +36,7 @@ export async function buildDashboard() {
   ]);
 
   // ── META ─────────────────────────────────────────────────────────────────
-  const totalUnits = queryOne("SELECT COUNT(*) as c FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1")?.c || 0;
+  const totalUnits = queryOne("SELECT COUNT(*) as c FROM units")?.c || 0;
   const activeLeaseCount = queryOne("SELECT COUNT(*) as c FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND p.is_active = 1")?.c || 0;
 
   const meta = {
@@ -138,8 +138,8 @@ export async function buildDashboard() {
 
   const incomeByMonth = months.map(m => {
     const row = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as gross, SUM(CASE WHEN gl_account_type = 'Expense' THEN ${expSign} ELSE 0 END) as expense FROM gl_entries WHERE date >= ? AND date <= ?`, [m.start, m.end]);
-    const gross = Math.round((row?.gross || 0) / 1000);
-    const expense = Math.round((row?.expense || 0) / 1000);
+    const gross = Math.round(row?.gross || 0);
+    const expense = Math.round(row?.expense || 0);
     return { month: m.label, gross, net: gross - expense, _expense: expense };
   });
   const grossIncomeTotal = incomeByMonth.reduce((s, m) => s + m.gross, 0);
@@ -147,7 +147,7 @@ export async function buildDashboard() {
 
   // RPU = last complete month GL income / units
   const lcm = months[months.length - 2]; // second to last = last complete month
-  const rpuIncome = lcm ? (queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as inc FROM gl_entries WHERE date >= ? AND date <= ?`, [lcm.start, lcm.end])?.inc || 0) : 0;
+  const rpuIncome = lcm ? (queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' AND gl_account_name NOT IN ('Rent Income','Deposits to be Refunded - Income','Insurance Claim','Owner - Non Refundable Pet Fee','Interest Income') THEN ABS(amount) ELSE 0 END) as inc FROM gl_entries WHERE date >= ? AND date <= ?`, [lcm.start, lcm.end])?.inc || 0) : 0;
   const rpuValue = totalUnits ? Math.round(rpuIncome / totalUnits) : 0;
 
   // Rent collection by Nth (from daily_snapshots)
@@ -169,8 +169,8 @@ export async function buildDashboard() {
     rentCollectedBy10th: buildKpi(by10th.value, 0, { unit: "%" }),
     avgRentPerDoor: buildKpi(avgRentPerLease, 0, { unit: "$" }),
     rpu: buildKpi(rpuValue, 0, { unit: "$" }),
-    grossIncome: buildKpi(grossIncomeTotal, 0, { unit: "$k" }),
-    netIncome: buildKpi(netIncomeTotal, 0, { unit: "$k" }),
+    grossIncome: buildKpi(grossIncomeTotal, 0, { unit: "$" }),
+    netIncome: buildKpi(netIncomeTotal, 0, { unit: "$" }),
     delinquent: buildKpi(Math.round(delinquentTotal), 0, { unit: "$", invertDelta: true }),
     delinquentCount: buildKpi(delinquentCount, 0, { invertDelta: true }),
   };

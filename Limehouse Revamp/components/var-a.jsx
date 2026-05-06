@@ -337,8 +337,8 @@ const VarA = (function() {
                 yFmt={(v) => '$' + v + 'k'}
               />
             </ChartCard>
-            <KPI {...k('Gross income', 'BD', SD.financials.grossIncome, 'k', 'grossIncome', '#3d8c1f', false, null, 'grossIncome')} mobile={mobile} showSource={showSource} />
-            <KPI {...k('Net income', 'BD', SD.financials.netIncome, 'k', 'netIncome', '#3d8c1f', false, null, 'netIncome')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Gross income', 'BD', SD.financials.grossIncome, '$', 'grossIncome', '#3d8c1f', false, null, 'grossIncome')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Net income', 'BD', SD.financials.netIncome, '$', 'netIncome', '#3d8c1f', false, null, 'netIncome')} mobile={mobile} showSource={showSource} />
           </div>
 
           {/* OCCUPANCY */}
