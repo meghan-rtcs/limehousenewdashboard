@@ -290,7 +290,7 @@ const VarA = (function() {
           <div style={{ display: 'grid', gridTemplateColumns: dgrid(4), gap: mobile ? 8 : 10, marginBottom: mobile ? 8 : 10 }}>
             <KPI {...k('Rent by 3rd', 'BD', SD.financials.rentCollectedBy3rd, '%', 'rentCollected3rd', '#3d8c1f', false, null, 'rentCollectedBy3rd')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Rent by 10th', 'BD', SD.financials.rentCollectedBy10th, '%', 'rentCollected10th', '#3d8c1f', false, null, 'rentCollectedBy10th')} mobile={mobile} showSource={showSource} />
-            <KPI {...k('Avg rent / door', 'BD', SD.financials.avgRentPerDoor, '$', 'avgRent', '#3d8c1f', false, null, 'avgRentPerDoor')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Avg rent / lease', 'BD', SD.financials.avgRentPerDoor, '$', 'avgRent', '#3d8c1f', false, null, 'avgRentPerDoor')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Revenue / unit', 'BD', SD.financials.rpu, '$', 'rpu', '#3d8c1f', false, null, 'rpu')} mobile={mobile} showSource={showSource} />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '2fr 1fr', gap: mobile ? 8 : 10, marginBottom: mobile ? 8 : 10 }}>
@@ -347,7 +347,7 @@ const VarA = (function() {
             <KPI {...k('Total units', 'BD', { value: SD.occupancy.totalUnits, prevYear: 96 }, null, null, null, false, null, 'totalUnits')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Vacant — not rented', 'BD', SD.occupancy.vacantNotRented, '', null, '#c0392b', false, 'red', 'vacantNotRented')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Avg days vacant', 'BD', SD.occupancy.avgDaysVacant, null, null, null, false, null, 'avgDaysVacant')} mobile={mobile} showSource={showSource} />
-            <KPI {...k('Doors added', 'BD', SD.occupancy.doorsAdded, '', 'doorsAdded', '#3d8c1f', false, null, 'doorsAdded')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Doors added ⏳', 'BD', SD.occupancy.doorsAdded, '', 'doorsAdded', '#9aa595', false, null, 'doorsAdded')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Doors lost (churn)', 'BD', SD.occupancy.doorsLost, '', 'doorsLost', '#c0392b', false, 'red', 'doorsLost')} mobile={mobile} showSource={showSource} />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '2fr 1fr', gap: mobile ? 8 : 10, marginTop: mobile ? 8 : 10 }}>
