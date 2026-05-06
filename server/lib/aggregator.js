@@ -165,13 +165,19 @@ export async function buildDashboard() {
   const by3rd = rentByDay(3);
   const by10th = rentByDay(10);
 
+  // YTD income (Jan 1 of current year to today)
+  const ytdStart = now.getUTCFullYear() + "-01-01";
+  const ytdGross = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN amount ELSE 0 END) as total FROM gl_entries WHERE date >= ?`, [ytdStart])?.total || 0;
+  const ytdExpense = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Expense' THEN amount ELSE 0 END) as total FROM gl_entries WHERE date >= ?`, [ytdStart])?.total || 0;
+  const ytdNet = ytdGross - ytdExpense;
+
   const financials = {
     rentCollectedBy3rd: buildKpi(by3rd.value, 0, { unit: "%" }),
     rentCollectedBy10th: buildKpi(by10th.value, 0, { unit: "%" }),
     avgRentPerDoor: buildKpi(avgRentPerLease, 0, { unit: "$" }),
     rpu: buildKpi(rpuValue, 0, { unit: "$" }),
-    grossIncome: buildKpi(grossIncomeTotal, 0, { unit: "$" }),
-    netIncome: buildKpi(netIncomeTotal, 0, { unit: "$" }),
+    grossIncome: buildKpi(Math.round(ytdGross), 0, { unit: "$" }),
+    netIncome: buildKpi(Math.round(ytdNet), 0, { unit: "$" }),
     delinquent: buildKpi(Math.round(delinquentTotal), 0, { unit: "$", invertDelta: true }),
     delinquentCount: buildKpi(delinquentCount, 0, { invertDelta: true }),
   };
