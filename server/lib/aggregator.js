@@ -36,7 +36,7 @@ export async function buildDashboard() {
   ]);
 
   // ── META ─────────────────────────────────────────────────────────────────
-  const totalUnits = queryOne("SELECT COUNT(*) as c FROM units")?.c || 0;
+  const totalUnits = queryOne("SELECT COUNT(*) as c FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1")?.c || 0;
   const activeLeaseCount = queryOne("SELECT COUNT(*) as c FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND p.is_active = 1")?.c || 0;
 
   const meta = {
@@ -289,7 +289,7 @@ export async function buildDashboard() {
     mtmLeases: { title: "MTM leases", cols: ["ID", "Property", "Unit"], rows: activeLeaseRows.filter(l => l.type === "AtWill").map(l => [String(l.id), propName(l.property_id), l.unit_number || "—"]), summary: `${mtmLeases}` },
     evictionsPending: { title: "Evictions", cols: ["Lease", "Unit"], rows: query("SELECT l.id, u.unit_number FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND l.is_eviction_pending = 1 AND p.is_active = 1 LIMIT 200").map(l => [String(l.id), l.unit_number || "—"]), summary: `${evictionsPendingCount}` },
     avgRentPerDoor: { title: "Leases by rent", cols: ["ID", "Property", "Rent"], rows: activeLeaseRows.map(l => [String(l.id), propName(l.property_id), l.rent ? `$${Math.round(l.rent).toLocaleString()}` : "—"]), summary: `Avg $${avgRentPerLease}` },
-    rpu: { title: "Revenue per unit", cols: ["Month", "RPU"], rows: incomeByMonth.slice(-3).map(m => [m.month, `$${totalUnits ? Math.round((m.gross * 1000) / totalUnits) : 0}`]), summary: `$${rpuValue}/unit` },
+    rpu: { title: "Revenue per unit", cols: ["Month", "RPU"], rows: incomeByMonth.slice(-3).map(m => [m.month, `$${totalUnits ? Math.round((m.gross) / totalUnits) : 0}`]), summary: `$${rpuValue}/unit` },
     grossIncome: { title: "Gross income (12mo)", cols: ["Month", "Gross ($k)"], rows: incomeByMonth.map(m => [m.month, `$${m.gross}k`]), summary: `$${grossIncomeTotal}k` },
     netIncome: { title: "Net income (12mo)", cols: ["Month", "Gross", "Net"], rows: incomeByMonth.map(m => [m.month, `$${m.gross}k`, `$${m.net}k`]), summary: `$${netIncomeTotal}k` },
     rentCollectedBy3rd: { title: "Rent by 3rd", cols: ["Note"], rows: [["Snapshots accumulate over time."]], summary: `${by3rd.value}% (${by3rd.monthsCounted} months)` },
