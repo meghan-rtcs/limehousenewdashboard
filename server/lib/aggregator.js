@@ -124,8 +124,9 @@ export async function buildDashboard() {
 
   // Monthly GL income (last 12 months)
   const months = [];
-  for (let i = 11; i >= 0; i--) {
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+  const ytdMonthCount = now.getUTCMonth() + 1;
+  for (let i = ytdMonthCount - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), i, 1));
     months.push({
       label: MONTH_LABELS[d.getUTCMonth()], year: d.getUTCFullYear(),
       start: d.toISOString().slice(0, 10),
@@ -146,7 +147,7 @@ export async function buildDashboard() {
   const netIncomeTotal = incomeByMonth.reduce((s, m) => s + m.net, 0);
 
   // RPU = last complete month GL income / units
-  const lcm = months[months.length - 2]; // second to last = last complete month
+  const lcm = months.length >= 2 ? months[months.length - 2] : months[0]; // last complete month YTD
   const rpuIncome = lcm ? (queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' AND gl_account_name NOT IN ('Rent Income','Deposits to be Refunded - Income','Insurance Claim','Owner - Non Refundable Pet Fee','Interest Income') THEN ABS(amount) ELSE 0 END) as inc FROM gl_entries WHERE date >= ? AND date <= ?`, [lcm.start, lcm.end])?.inc || 0) : 0;
   const rpuValue = totalUnits ? Math.round(rpuIncome / totalUnits) : 0;
 
