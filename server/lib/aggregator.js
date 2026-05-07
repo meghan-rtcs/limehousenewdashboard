@@ -125,7 +125,7 @@ export async function buildDashboard() {
   // Monthly GL income (last 12 months)
   const months = [];
   const ytdMonthCount = now.getUTCMonth() + 1;
-  for (let i = ytdMonthCount - 1; i >= 0; i--) {
+  for (let i = 0; i < ytdMonthCount; i++) {
     const d = new Date(Date.UTC(now.getUTCFullYear(), i, 1));
     months.push({
       label: MONTH_LABELS[d.getUTCMonth()], year: d.getUTCFullYear(),

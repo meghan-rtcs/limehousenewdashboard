@@ -318,8 +318,8 @@ const VarA = (function() {
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '3fr 1fr 1fr', gap: mobile ? 8 : 10 }}>
             <ChartCard mobile={mobile}
-              title="Gross & Net income — 12 months"
-              subtitle="Monthly totals (thousands)"
+              title="Gross & Net income — YTD"
+              subtitle="Monthly totals"
               legend={
                 <div style={{ display:'flex', gap:10, fontSize: 10, color:'#6b7566' }}>
                   <span style={{ display:'inline-flex',alignItems:'center',gap:4 }}><span style={{ width:8,height:8,background:'#3d8c1f',borderRadius:2 }} />Gross</span>
@@ -334,7 +334,7 @@ const VarA = (function() {
                   { key: 'net',   color: '#2471a3' },
                 ]}
                 height={mobile ? 110 : 130}
-                yFmt={(v) => '$' + v + 'k'}
+                yFmt={(v) => '$' + Math.round(v / 1000) + 'k'}
               />
             </ChartCard>
             <KPI {...k('Gross income', 'BD', SD.financials.grossIncome, '$', 'grossIncome', '#3d8c1f', false, null, 'grossIncome')} mobile={mobile} showSource={showSource} />
