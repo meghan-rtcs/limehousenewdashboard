@@ -339,11 +339,10 @@ const VarA = (function() {
 
           {/* FINANCIALS */}
           <SectionHeader title="Financials" subtitle="Income, collection, delinquency" />
-          <div style={{ display: 'grid', gridTemplateColumns: dgrid(4), gap: mobile ? 8 : 10, marginBottom: mobile ? 8 : 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: dgrid(3), gap: mobile ? 8 : 10, marginBottom: mobile ? 8 : 10 }}>
             <KPI {...k('Rent by 3rd', 'BD', SD.financials.rentCollectedBy3rd, '%', 'rentCollected3rd', '#3d8c1f', false, null, 'rentCollectedBy3rd')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Rent by 10th', 'BD', SD.financials.rentCollectedBy10th, '%', 'rentCollected10th', '#3d8c1f', false, null, 'rentCollectedBy10th')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Avg rent / lease', 'BD', SD.financials.avgRentPerDoor, '$', 'avgRent', '#3d8c1f', false, null, 'avgRentPerDoor')} mobile={mobile} showSource={showSource} />
-            <KPI {...k('Revenue / unit', 'BD', SD.financials.rpu, '$', 'rpu', '#3d8c1f', false, null, 'rpu')} mobile={mobile} showSource={showSource} />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '2fr 1fr', gap: mobile ? 8 : 10, marginBottom: mobile ? 8 : 10 }}>
             <ChartCard mobile={mobile}
@@ -392,6 +391,44 @@ const VarA = (function() {
             <KPI {...k('Gross income', 'BD', SD.financials.grossIncome, '$', 'grossIncome', '#3d8c1f', false, null, 'grossIncome')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Net income', 'BD', SD.financials.netIncome, '$', 'netIncome', '#3d8c1f', false, null, 'netIncome')} mobile={mobile} showSource={showSource} />
           </div>
+          {(() => {
+            const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            const yrs = Object.keys(SD.rpuByYear || {}).map(Number).sort((a,b) => b - a);
+            const curY = yrs[0]; const prevY = yrs[1];
+            const curMonths = SD.rpuByYear?.[curY] || {};
+            const prevMonths = SD.rpuByYear?.[prevY] || {};
+            const lastCurMonth = Math.max(0, ...Object.keys(curMonths).map(Number));
+            const rpuYoYData = monthLabels.slice(0, lastCurMonth || 12).map((label, i) => ({
+              month: label,
+              cur: curMonths[i + 1] ?? prevMonths[i + 1] ?? 0,
+              prev: prevMonths[i + 1] ?? 0,
+            }));
+            return (
+              <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '3fr 1fr', gap: mobile ? 8 : 10, marginTop: mobile ? 8 : 10 }}>
+                <ChartCard mobile={mobile}
+                  title={`Revenue per unit — ${curY} vs ${prevY}`}
+                  subtitle="Monthly RPU, year-over-year"
+                  legend={
+                    <div style={{ display:'flex', gap:10, fontSize: 10, color:'#6b7566' }}>
+                      <span style={{ display:'inline-flex',alignItems:'center',gap:4 }}><span style={{ width:8,height:8,background:'#3d8c1f',borderRadius:2 }} />{curY}</span>
+                      <span style={{ display:'inline-flex',alignItems:'center',gap:4 }}><span style={{ width:8,height:8,background:'#aab5a3',borderRadius:2 }} />{prevY}</span>
+                    </div>
+                  }
+                  onClick={() => setDrillKey('rpu')}>
+                  <LineChart
+                    data={rpuYoYData}
+                    series={[
+                      { key: 'prev', color: '#aab5a3' },
+                      { key: 'cur',  color: '#3d8c1f' },
+                    ]}
+                    height={mobile ? 110 : 130}
+                    yFmt={(v) => '$' + v}
+                  />
+                </ChartCard>
+                <KPI {...k('Revenue / unit', 'BD', SD.financials.rpu, '$', 'rpu', '#3d8c1f', false, null, 'rpu')} mobile={mobile} showSource={showSource} />
+              </div>
+            );
+          })()}
 
           {/* OCCUPANCY */}
           <SectionHeader title="Occupancy & Doors" />
