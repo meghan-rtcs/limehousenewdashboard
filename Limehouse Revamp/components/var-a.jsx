@@ -583,6 +583,15 @@ const VarA = (function() {
               )}
             </div>
           )}
+          {drill?.note && (
+            <div style={{
+              margin: '14px 22px 0', padding: '10px 12px',
+              background: '#fff8e6', border: '1px solid #f0d68c', borderRadius: 7,
+              fontSize: 12, color: '#6b5a1a', lineHeight: 1.45,
+            }}>
+              <span style={{ fontWeight: 700, marginRight: 6 }}>Note:</span>{drill.note}
+            </div>
+          )}
           {drill && <DrillTable cols={drill.cols} rows={drill.rows} />}
         </Modal>
         </>}
