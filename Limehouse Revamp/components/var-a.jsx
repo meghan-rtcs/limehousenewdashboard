@@ -250,9 +250,11 @@ const VarA = (function() {
     // Recompute scaled data whenever the range changes
     const { data: SD, range: rangeMeta } = useMemo(() => scaleData(range), [range]);
 
-    // Set of drill keys that are backed by real, live API data
+    // Set of drill keys that are backed by real, live API data.
+    // Exclude any metric whose value scales with the date-range dropdown — those
+    // are windowed (not live point-in-time) so the LIVE badge would be misleading.
     const liveSet = useMemo(
-      () => new Set(SD.meta?.liveMetrics || []),
+      () => new Set((SD.meta?.liveMetrics || []).filter(k => !cumulativeKeys.has(k))),
       [SD]
     );
 
