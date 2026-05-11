@@ -62,5 +62,7 @@ export const buildium = {
     listAll("/generalledger/transactions", params, { pageSize: 1000, max: 100000 }),
   listRenewalHistory: (params) =>
     listAll("/leases/renewalhistory", params, { pageSize: 1000, max: 50000 }),
+  listApplicants: () =>
+    listAll("/applicants", {}, { pageSize: 1000, max: 50000 }),
   raw: request,
 };

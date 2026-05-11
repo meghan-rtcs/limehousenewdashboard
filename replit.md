@@ -31,7 +31,7 @@ A static React dashboard (Babel-in-browser) for Limehouse Property Management, s
 | Gross / net income (12 mo) | Buildium `/glaccounts` + `/generalledger/transactions` | Filters journal lines to `Type=Income` and `Type=Expense` GL accounts; sums `Journal.Lines[].Amount` per month |
 | Lease type counts (fixed vs MTM) | Buildium active leases (`LeaseType`) | |
 | New prospects, source breakdown | RentEngine `/prospects?created_after=&created_before=` | |
-| Applications submitted | RentEngine `/rental_application_groups?created_after=&created_before=` | Returns paginated envelope |
+| Applications submitted | Buildium `/applicants` | Each applicant record has `Applications[]` with `ApplicationSubmittedDateTime`; we count submissions in the trailing 12 months. RentEngine's `/rental_application_groups` returned 0 for this account, so Buildium is the system of record. |
 | Units on market | RentEngine `/units` filtered by `status` | |
 | Avg / median days on market | RentEngine `/units` (created_at) | Days since `created_at` for units where `!is_occupied` and `status` is Available/Listed |
 | Rent by 3rd / 10th | Sync-history snapshots (`server/data/sync-history.json`) | Each successful sync records `{paidLeases, totalLeases}`. Tile = avg paid% across the latest snapshot of each of the last 6 months whose dayOfMonth ≤ N. Empty/zero until snapshots accumulate across months. |

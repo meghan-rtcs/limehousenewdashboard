@@ -1,5 +1,6 @@
 import { query, queryOne } from "./db.js";
 import { rentengine } from "./rentengine.js";
+import { buildium } from "./buildium.js";
 
 const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -29,11 +30,27 @@ export async function buildDashboard() {
 
   // ── RentEngine data (still live — not in DB yet) ───────────────────────
   const yearAgoFrom = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1)).toISOString();
-  const [reUnits, reProspects, reAppGroups] = await Promise.all([
+  const [reUnits, reProspects, reAppGroups, bdApplicants] = await Promise.all([
     safe(rentengine.listUnits(), []),
     safe(rentengine.listProspects(yearAgoFrom, now.toISOString()), []),
     safe(rentengine.listApplicationGroups({ createdAfter: yearAgoFrom, createdBefore: now.toISOString() }), []),
+    safe(buildium.listApplicants(), []),
   ]);
+
+  // Buildium applications submitted in the trailing 12 months
+  // Each applicant record has Applications[] with ApplicationSubmittedDateTime.
+  const yearAgoMs = new Date(yearAgoIso).getTime();
+  const submittedApps = [];
+  for (const a of bdApplicants) {
+    for (const app of a.Applications || []) {
+      const ts = app.ApplicationSubmittedDateTime;
+      if (!ts) continue;
+      const t = new Date(ts).getTime();
+      if (t >= yearAgoMs && t <= now.getTime()) {
+        submittedApps.push({ applicant: a, app });
+      }
+    }
+  }
 
   // ── META ─────────────────────────────────────────────────────────────────
   const totalUnits = queryOne("SELECT COUNT(*) as c FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1")?.c || 0;
@@ -99,7 +116,7 @@ export async function buildDashboard() {
   const renewalRate = renewalDenominator ? Math.round((renewalsInWindow / renewalDenominator) * 1000) / 10 : 0;
   const evictionsPendingCount = queryOne(`SELECT COUNT(*) as c FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND l.is_eviction_pending = 1 AND p.is_active = 1`)?.c || 0;
 
-  const appsSubmitted = reAppGroups.length;
+  const appsSubmitted = submittedApps.length;
   // Move-ins from Buildium: leases that started in the trailing 12 months and aren't Future
   const moveinsRows = query(`SELECT l.id, l.from_date FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND l.status != 'Future' AND l.from_date >= ? AND l.from_date <= ?`, [yearAgoIso, todayIso]);
   const moveins = moveinsRows.length;
@@ -304,7 +321,7 @@ export async function buildDashboard() {
     rentCollectedBy3rd: { title: "Rent by 3rd", cols: ["Note"], rows: [["Snapshots accumulate over time."]], summary: `${by3rd.value}% (${by3rd.monthsCounted} months)` },
     rentCollectedBy10th: { title: "Rent by 10th", cols: ["Note"], rows: [["Snapshots accumulate over time."]], summary: `${by10th.value}% (${by10th.monthsCounted} months)` },
     newProspects: { title: "Prospects", cols: ["Name", "Source", "Created"], rows: reProspects.slice(-200).reverse().map(p => [p.name || "—", p.source || "—", (p.created_at || "").slice(0, 10)]), summary: `${newProspects} prospects` },
-    appsSubmitted: { title: "Applications", cols: ["ID", "Status", "Created"], rows: reAppGroups.slice(-200).reverse().map(g => [String(g.id || g.group_id || ""), g.status || "—", (g.created_at || "").slice(0, 10)]), summary: `${appsSubmitted}` },
+    appsSubmitted: { title: "Applications submitted (last 12 mo)", cols: ["Applicant", "Status", "App #", "Submitted"], rows: submittedApps.slice().sort((x, y) => (y.app.ApplicationSubmittedDateTime || "").localeCompare(x.app.ApplicationSubmittedDateTime || "")).slice(0, 500).map(({ applicant, app }) => [`${applicant.FirstName || ""} ${applicant.LastName || ""}`.trim() || "—", app.ApplicationStatus || applicant.Status || "—", app.ApplicationNumber || String(app.Id || ""), (app.ApplicationSubmittedDateTime || "").slice(0, 10)]), summary: `${appsSubmitted} applications submitted` },
     moveins: { title: "Move-ins (last 12 mo)", cols: ["Lease", "Start"], rows: moveinsRows.slice(-200).reverse().map(r => [String(r.id), r.from_date || "—"]), summary: `${moveins} move-ins` },
     appsPerMovein: { title: "Funnel", cols: ["Stage", "Count"], rows: [["Apps", String(appsSubmitted)], ["Move-ins", String(moveins)], ["Ratio", moveins ? (appsSubmitted / moveins).toFixed(1) : "—"]], summary: moveins ? `${(appsSubmitted / moveins).toFixed(1)} apps per move-in` : "—" },
     completionRate: notWired("Completion rate", "No showing source."),

@@ -499,11 +499,11 @@ const VarA = (function() {
             <KPI {...k('Renewals', 'BD', SD.leasing.renewalsCount, null, null, null, false, null, 'renewalsCount')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Fixed-term leases', 'BD', SD.leasing.fixedLeases, null, null, null, false, null, 'fixedLeases')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Month-to-month', 'BD', SD.leasing.mtmLeases, null, null, null, false, null, 'mtmLeases')} mobile={mobile} showSource={showSource} />
-            <KPI {...k('Apps submitted', 'RE', SD.leasing.appsSubmitted, null, null, null, false, null, 'appsSubmitted')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Apps submitted', 'BD', SD.leasing.appsSubmitted, null, null, null, false, null, 'appsSubmitted')} mobile={mobile} showSource={showSource} />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: dgrid(4), gap: mobile ? 8 : 10, marginTop: mobile ? 8 : 10 }}>
-            <KPI {...k('Move-ins', 'RE', SD.leasing.moveins, null, null, null, false, null, 'moveins')} mobile={mobile} showSource={showSource} />
-            <KPI {...k('Apps per move-in', 'RE', SD.leasing.appsPerMovein, null, null, null, false, null, 'appsPerMovein')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Move-ins', 'BD', SD.leasing.moveins, null, null, null, false, null, 'moveins')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Apps per move-in', 'BD', SD.leasing.appsPerMovein, null, null, null, false, null, 'appsPerMovein')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Evictions pending', 'BD', SD.leasing.evictionsPending, '', null, '#c0392b', false, 'red', 'evictionsPending')} mobile={mobile} showSource={showSource} />
             <ChartCard mobile={mobile} title={`Renewals — ${rangeMeta.sliceTail} mo`} subtitle={`${SD.leasing.renewalsCount.value} total`} onClick={() => setDrillKey('renewalsCount')}>
               <MiniBars data={SD.renewalsByMonth} valueKey="count" height={mobile?40:46} color="#3d8c1f" />
