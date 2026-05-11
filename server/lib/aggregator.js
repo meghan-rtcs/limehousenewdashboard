@@ -135,7 +135,10 @@ export async function buildDashboard() {
   // ── FINANCIALS ─────────────────────────────────────────────────────────
   const latestSnap = queryOne("SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT 1");
   const delinquentCount = latestSnap?.delinquent_count || 0;
-  const delinquentTotal = latestSnap?.delinquent_total || 0;
+  // Pull the exact (un-rounded) total from outstanding_snapshots so the tile shows cents.
+  const latestObSnapDate = queryOne("SELECT MAX(snapshot_date) as d FROM outstanding_snapshots")?.d;
+  const exactDelinqRow = latestObSnapDate ? queryOne("SELECT SUM(total_balance) as t FROM outstanding_snapshots WHERE snapshot_date = ?", [latestObSnapDate]) : null;
+  const delinquentTotal = exactDelinqRow?.t ?? (latestSnap?.delinquent_total || 0);
 
   const rentResult = queryOne(`SELECT AVG(l.rent) as avg_rent, SUM(l.rent) as total_rent FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND p.is_active = 1 AND l.rent > 0`);
   const avgRentPerLease = Math.round(rentResult?.avg_rent || 0);
@@ -197,7 +200,7 @@ export async function buildDashboard() {
     rpu: buildKpi(rpuValue, 0, { unit: "$" }),
     grossIncome: buildKpi(Math.round(ytdGross), 0, { unit: "$" }),
     netIncome: buildKpi(Math.round(ytdNet), 0, { unit: "$" }),
-    delinquent: buildKpi(Math.round(delinquentTotal), 0, { unit: "$", invertDelta: true }),
+    delinquent: buildKpi(Math.round(delinquentTotal * 100) / 100, 0, { unit: "$", invertDelta: true }),
     delinquentCount: buildKpi(delinquentCount, 0, { invertDelta: true }),
   };
 
@@ -273,7 +276,9 @@ export async function buildDashboard() {
   const goiByYear = {};
   for (const r of goiYoY) { if (!goiByYear[r.year]) goiByYear[r.year] = {}; goiByYear[r.year][r.month] = Math.round(r.oi); }
 
-  const rpuYoY = query(`SELECT CAST(strftime('%Y', date) AS INTEGER) as year, CAST(strftime('%m', date) AS INTEGER) as month, SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as inc FROM gl_entries GROUP BY year, month ORDER BY year, month`);
+  // RPU YoY uses the same operating-revenue exclusions as the RPU tile so the
+  // line chart and the tile agree (both = PM operating revenue per unit).
+  const rpuYoY = query(`SELECT CAST(strftime('%Y', date) AS INTEGER) as year, CAST(strftime('%m', date) AS INTEGER) as month, SUM(CASE WHEN gl_account_type = 'Income' AND gl_account_name NOT IN ('Rent Income','Deposits to be Refunded - Income','Insurance Claim','Owner - Non Refundable Pet Fee','Interest Income') THEN ABS(amount) ELSE 0 END) as inc FROM gl_entries GROUP BY year, month ORDER BY year, month`);
   const rpuByYear = {};
   for (const r of rpuYoY) {
     if (!rpuByYear[r.year]) rpuByYear[r.year] = {};
@@ -298,7 +303,7 @@ export async function buildDashboard() {
   const activeLeaseRows = query(`SELECT l.id, l.property_id, u.unit_number, l.rent, l.type, l.from_date, l.to_date FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND p.is_active = 1 ORDER BY l.rent DESC LIMIT 500`);
 
   const drilldowns = {
-    delinquent: { title: "Delinquent leases", cols: ["Lease ID", "Balance"], rows: latestObDate ? query("SELECT lease_id, total_balance FROM outstanding_snapshots WHERE snapshot_date = ? ORDER BY total_balance DESC LIMIT 200", [latestObDate]).map(r => [String(r.lease_id), `$${Math.round(r.total_balance).toLocaleString()}`]) : [], summary: `${delinquentCount} leases · $${Math.round(delinquentTotal).toLocaleString()}` },
+    delinquent: { title: "Delinquent leases", cols: ["Lease ID", "Balance"], rows: latestObDate ? query("SELECT lease_id, total_balance FROM outstanding_snapshots WHERE snapshot_date = ? ORDER BY total_balance DESC LIMIT 200", [latestObDate]).map(r => [String(r.lease_id), `$${(r.total_balance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`]) : [], summary: `${delinquentCount} leases · $${(delinquentTotal ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
     occupancy: { title: "Occupied units", cols: ["Lease", "Property", "Unit", "Rent"], rows: activeLeaseRows.map(l => [String(l.id), propName(l.property_id), l.unit_number || "—", l.rent ? `$${Math.round(l.rent).toLocaleString()}` : "—"]), summary: `${occupiedUnits}/${totalUnits} · ${pct(occupiedUnits, totalUnits)}%` },
     totalUnits: { title: "All units", cols: ["ID", "Property", "Unit", "Occupied"], rows: query("SELECT u.id, u.property_id, u.unit_number, u.is_occupied FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 LIMIT 500").map(u => [String(u.id), propName(u.property_id), u.unit_number || "—", u.is_occupied ? "yes" : "no"]), summary: `${totalUnits} units` },
     vacantNotRented: { title: "Vacant (no future lease)", cols: ["ID", "Property", "Unit"], rows: query(`SELECT u.id, u.property_id, u.unit_number FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND u.is_occupied = 0 AND u.id NOT IN (SELECT DISTINCT unit_id FROM leases WHERE status = 'Future' AND from_date > ?) LIMIT 500`, [todayIso]).map(u => [String(u.id), propName(u.property_id), u.unit_number || "—"]), summary: `${vacantNotRentedCount} vacant` },

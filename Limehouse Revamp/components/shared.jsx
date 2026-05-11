@@ -320,9 +320,9 @@ function LineChart({ data, series, height = 140, padding = { l: 32, r: 8, t: 8, 
   const W = 600;  // viewBox width; SVG scales to container
   const H = height;
   const labels = data.map(d => d.month || d.label || '');
-  const allValues = data.flatMap(d => series.map(s => d[s.key]));
-  const max = Math.max(...allValues);
-  const min = Math.min(...allValues);
+  const allValues = data.flatMap(d => series.map(s => d[s.key])).filter(v => v != null && Number.isFinite(v));
+  const max = allValues.length ? Math.max(...allValues) : 1;
+  const min = allValues.length ? Math.min(...allValues) : 0;
   const yMin = Math.floor(min * 0.95);
   const yMax = Math.ceil(max * 1.05);
   const range = yMax - yMin || 1;
@@ -348,15 +348,28 @@ function LineChart({ data, series, height = 140, padding = { l: 32, r: 8, t: 8, 
         <text key={i} x={xScale(i)} y={H - 4} fontSize="9" fill="#9aa595" textAnchor="middle" fontFamily="'Outfit', sans-serif">{l[0]}</text>
       ))}
       {series.map((s, si) => {
-        const pts = data.map((d, i) => [xScale(i), yScale(d[s.key])]);
-        const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
-        const area = path + ` L${pts[pts.length-1][0]},${H - padding.b} L${pts[0][0]},${H - padding.b} Z`;
+        // Build segments split on null/undefined so missing months don't draw spurious lines.
+        const segs = [];
+        let cur = [];
+        data.forEach((d, i) => {
+          const v = d[s.key];
+          if (v == null || !Number.isFinite(v)) {
+            if (cur.length) { segs.push(cur); cur = []; }
+          } else {
+            cur.push([xScale(i), yScale(v)]);
+          }
+        });
+        if (cur.length) segs.push(cur);
+        const allPts = segs.flat();
+        const sw = s.width || 1.8;
         return (
           <g key={si}>
-            {s.fill !== false && <path d={area} fill={s.color} fillOpacity="0.10" />}
-            <path d={path} fill="none" stroke={s.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-            {pts.map((p, i) => (
-              <circle key={i} cx={p[0]} cy={p[1]} r={i === pts.length - 1 ? 3 : 1.8} fill={s.color} />
+            {segs.map((pts, j) => {
+              const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+              return <path key={j} d={path} fill="none" stroke={s.color} strokeWidth={sw} strokeOpacity={s.opacity ?? 1} strokeLinecap="round" strokeLinejoin="round" strokeDasharray={s.dash || '0'} />;
+            })}
+            {s.dots !== false && allPts.map((p, i) => (
+              <circle key={i} cx={p[0]} cy={p[1]} r={i === allPts.length - 1 ? 2.4 : 1.4} fill={s.color} fillOpacity={s.opacity ?? 1} />
             ))}
           </g>
         );

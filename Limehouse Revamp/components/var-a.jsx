@@ -393,35 +393,49 @@ const VarA = (function() {
           </div>
           {(() => {
             const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-            const yrs = Object.keys(SD.rpuByYear || {}).map(Number).sort((a,b) => b - a);
-            const curY = yrs[0]; const prevY = yrs[1];
-            const curMonths = SD.rpuByYear?.[curY] || {};
-            const prevMonths = SD.rpuByYear?.[prevY] || {};
-            const lastCurMonth = Math.max(0, ...Object.keys(curMonths).map(Number));
-            const rpuYoYData = monthLabels.slice(0, lastCurMonth || 12).map((label, i) => ({
-              month: label,
-              cur: curMonths[i + 1] ?? prevMonths[i + 1] ?? 0,
-              prev: prevMonths[i + 1] ?? 0,
-            }));
+            const yrs = Object.keys(SD.rpuByYear || {}).map(Number).sort((a, b) => a - b); // earliest → latest
+            const curY = yrs[yrs.length - 1];
+            // Build one column per year. Missing months stay undefined so the line breaks cleanly.
+            const rpuYoYData = monthLabels.map((label, i) => {
+              const row = { month: label };
+              for (const y of yrs) {
+                const v = SD.rpuByYear?.[y]?.[i + 1];
+                if (v != null) row[String(y)] = v;
+              }
+              return row;
+            });
+            // Color ramp: oldest year light gray → current year brand green.
+            const palette = ['#d6dbd1','#c2cbbb','#aebaa3','#9aa88c','#869676','#728560','#5e7449','#456020','#3d8c1f'];
+            const series = yrs.map((y, idx) => {
+              const isCurrent = y === curY;
+              const colorIdx = Math.round((idx / Math.max(yrs.length - 1, 1)) * (palette.length - 1));
+              return {
+                key: String(y),
+                color: isCurrent ? '#3d8c1f' : palette[colorIdx],
+                width: isCurrent ? 2.2 : 1.2,
+                opacity: isCurrent ? 1 : 0.85,
+                dots: isCurrent,
+              };
+            });
             return (
               <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '3fr 1fr', gap: mobile ? 8 : 10, marginTop: mobile ? 8 : 10 }}>
                 <ChartCard mobile={mobile}
-                  title={`Revenue per unit — ${curY} vs ${prevY}`}
-                  subtitle="Monthly RPU, year-over-year"
+                  title={`Revenue per unit — by year`}
+                  subtitle={`Operating revenue / unit per month · ${yrs[0]}–${curY}`}
                   legend={
-                    <div style={{ display:'flex', gap:10, fontSize: 10, color:'#6b7566' }}>
-                      <span style={{ display:'inline-flex',alignItems:'center',gap:4 }}><span style={{ width:8,height:8,background:'#3d8c1f',borderRadius:2 }} />{curY}</span>
-                      <span style={{ display:'inline-flex',alignItems:'center',gap:4 }}><span style={{ width:8,height:8,background:'#aab5a3',borderRadius:2 }} />{prevY}</span>
+                    <div style={{ display:'flex', gap:8, fontSize: 10, color:'#6b7566', flexWrap:'wrap', justifyContent:'flex-end' }}>
+                      {series.map(s => (
+                        <span key={s.key} style={{ display:'inline-flex',alignItems:'center',gap:4 }}>
+                          <span style={{ width:8,height:8,background:s.color,borderRadius:2,opacity:s.opacity }} />{s.key}
+                        </span>
+                      ))}
                     </div>
                   }
                   onClick={() => setDrillKey('rpu')}>
                   <LineChart
                     data={rpuYoYData}
-                    series={[
-                      { key: 'prev', color: '#aab5a3' },
-                      { key: 'cur',  color: '#3d8c1f' },
-                    ]}
-                    height={mobile ? 110 : 130}
+                    series={series}
+                    height={mobile ? 130 : 150}
                     yFmt={(v) => '$' + v}
                   />
                 </ChartCard>
