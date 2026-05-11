@@ -25,7 +25,7 @@ const VarA = (function() {
   function scaleData(range) {
     const r = RANGES[range] || RANGES['365'];
     const factor = r.months / 12;
-    const scale = (v) => Math.max(1, Math.round(v * factor));
+    const scale = (v) => v > 0 ? Math.max(1, Math.round(v * factor)) : 0;
     const scaled = JSON.parse(JSON.stringify(D));
     // Scale cumulative metrics — only on object-shaped sections, NOT arrays
     Object.keys(scaled).forEach(section => {
@@ -203,8 +203,44 @@ const VarA = (function() {
     );
   }
 
+  function CeoView({ mobile }) {
+    const [pw, setPw] = useState('');
+    const [unlocked, setUnlocked] = useState(() => sessionStorage.getItem('limehouse_ceo') === '1');
+    const [err, setErr] = useState(false);
+    if (!unlocked) {
+      return (
+        <div style={{ minHeight: 480, display:'flex', alignItems:'center', justifyContent:'center' }}>
+          <form onSubmit={(e) => { e.preventDefault(); if (pw === 'LimehouseRTCS') { sessionStorage.setItem('limehouse_ceo','1'); setUnlocked(true); } else { setErr(true); } }}
+            style={{ background:'#fff', border:'1px solid #e5e8e2', borderRadius:8, padding:'28px 32px', width: mobile?280:340, boxShadow:'0 4px 18px rgba(0,0,0,0.04)' }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595', marginBottom:6 }}>CEO View</div>
+            <div style={{ fontSize:15, color:'#1c2119', marginBottom:18, fontWeight:500 }}>Enter password to continue</div>
+            <input type="password" value={pw} onChange={(e) => { setPw(e.target.value); setErr(false); }}
+              autoFocus placeholder="Password"
+              style={{ width:'100%', padding:'10px 12px', fontSize:13, border: err ? '1px solid #c0392b' : '1px solid #cbd1c4', borderRadius:6, fontFamily:'inherit', boxSizing:'border-box', outline:'none' }} />
+            {err && <div style={{ color:'#c0392b', fontSize:11, marginTop:6 }}>Incorrect password.</div>}
+            <button type="submit" style={{ marginTop:14, width:'100%', padding:'10px 12px', background:'#1c2119', color:'#fff', border:'none', borderRadius:6, fontSize:13, fontWeight:500, cursor:'pointer', fontFamily:'inherit' }}>Unlock</button>
+          </form>
+        </div>
+      );
+    }
+    return (
+      <div style={{ padding: mobile ? '24px 14px 60px' : '60px 26px 80px', maxWidth: 1480, margin: '0 auto' }}>
+        <div style={{ background:'#fff', border:'1px solid #e5e8e2', borderRadius:10, padding: mobile?'40px 24px':'80px 60px', textAlign:'center' }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.14em', textTransform:'uppercase', color:'#9aa595', marginBottom:10 }}>CEO View</div>
+          <div style={{ fontSize: mobile?22:28, fontWeight:300, color:'#1c2119', letterSpacing:'-0.5px', marginBottom:10 }}>Coming soon</div>
+          <div style={{ fontSize:13, color:'#6b7566', maxWidth:480, margin:'0 auto', lineHeight:1.55 }}>
+            Executive KPIs aligned to job-description metrics will appear here once the scorecard is finalized.
+          </div>
+          <button onClick={() => { sessionStorage.removeItem('limehouse_ceo'); setUnlocked(false); setPw(''); }}
+            style={{ marginTop:24, background:'transparent', border:'1px solid #e5e8e2', color:'#6b7566', fontSize:11, padding:'5px 11px', borderRadius:5, cursor:'pointer', fontFamily:'inherit' }}>Lock</button>
+        </div>
+      </div>
+    );
+  }
+
   function Render({ tweaks }) {
     const [drillKey, setDrillKey] = useState(null);
+    const [tab, setTab] = useState('dashboard');
     const [range, setRange] = useState(tweaks.range || '365');
     const mobile = tweaks.viewport === 'phone';
     const showSource = tweaks.sourcePills;
@@ -238,6 +274,23 @@ const VarA = (function() {
       <div style={{ background: '#f4f5f3', minHeight: '100%', fontFamily: "'Outfit', sans-serif" }}>
         <Header syncedAt={SD.meta.syncedAt} range={range} onRangeChange={setRange} mobile={mobile} />
 
+        {/* Tab nav */}
+        <div style={{
+          background: '#fff', borderBottom: '1px solid #e5e8e2',
+          padding: mobile ? '0 14px' : '0 26px',
+          display: 'flex', alignItems: 'stretch', gap: 0,
+        }}>
+          {[{id:'dashboard',label:'Dashboard'},{id:'ceo',label:'CEO View'}].map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              background:'transparent', border:'none', borderBottom: tab===t.id ? '2px solid #1c2119' : '2px solid transparent',
+              padding: mobile ? '10px 14px' : '12px 18px', fontSize: 12, fontWeight: tab===t.id ? 600 : 500,
+              color: tab===t.id ? '#1c2119' : '#6b7566', cursor:'pointer', fontFamily:'inherit', letterSpacing:'0.02em',
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {tab === 'ceo' ? <CeoView mobile={mobile} /> : <>
+
         {/* Range banner — confirms what the user is looking at */}
         <div style={{
           background: '#fff', borderBottom: '1px solid #e5e8e2',
@@ -268,7 +321,6 @@ const VarA = (function() {
           }}>
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: '#9aa595' }}>Top of Mind</div>
-              <div style={{ fontSize: mobile?16:18, color: '#1c2119', marginTop: 2, fontWeight: 500 }}>The four metrics you watch first</div>
             </div>
             {yoy && <div style={{ fontSize: 11, color: '#9aa595' }}>YoY shown vs same period a year ago</div>}
           </div>
@@ -307,7 +359,7 @@ const VarA = (function() {
             </ChartCard>
             <ChartCard mobile={mobile}
               title="Delinquency aging"
-              subtitle={`${fmt.money(SD.financials.delinquent.value)} across 7 leases`}
+              subtitle={`${fmt.money(SD.financials.delinquent.value)} across ${SD.financials.delinquentCount.value} leases`}
               onClick={() => setDrillKey('delinquent')}>
               <HBars
                 rows={SD.agingBuckets.map(b => ({ label: b.label + ' days', value: b.amount, color: b.color }))}
@@ -362,7 +414,7 @@ const VarA = (function() {
                 yFmt={(v) => v + '%'}
               />
             </ChartCard>
-            <ChartCard mobile={mobile} title="Property health" subtitle="Across all active units">
+            <ChartCard mobile={mobile} title="Property health" subtitle="Healthy = occupied · At-risk = delinquent · Off-Market = vacant">
               <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
                 <Donut data={SD.healthCounts} size={mobile?80:96} thickness={mobile?12:14} colors={healthColors} />
                 <div style={{ flex:1 }}>
@@ -385,10 +437,10 @@ const VarA = (function() {
               <div style={{ display:'flex', justifyContent:'space-between', marginTop: 10, fontSize: 11, color: '#6b7566' }}>
                 <span><span style={{ color:'#3d8c1f', fontWeight:600 }}>+{SD.occupancy.doorsAdded.value}</span> added</span>
                 <span><span style={{ color:'#c0392b', fontWeight:600 }}>−{SD.occupancy.doorsLost.value}</span> lost</span>
-                <span style={{ color:'#9aa595' }}>Churn 7.1%</span>
+                <span style={{ color:'#9aa595' }}>Churn {SD.occupancy.totalUnits ? ((SD.occupancy.doorsLost.value / SD.occupancy.totalUnits) * 100).toFixed(1) : '0.0'}%</span>
               </div>
             </ChartCard>
-            <ChartCard mobile={mobile} title="Owners" subtitle={`${SD.occupancy.ownersTotal.value} active · +${SD.occupancy.ownersGained.value} gained`} onClick={() => setDrillKey('ownersGained')}>
+            <ChartCard mobile={mobile} title="Owners" subtitle={`${SD.occupancy.ownersTotal.value} active · +${SD.occupancy.ownersGained.value} gained`} onClick={() => setDrillKey('ownersTotal')}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div style={{ borderRight: '1px solid #eef0ec', paddingRight: 10 }}>
                   <div style={{ fontSize: 9.5, color: '#9aa595', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>Total</div>
@@ -480,6 +532,7 @@ const VarA = (function() {
           )}
           {drill && <DrillTable cols={drill.cols} rows={drill.rows} />}
         </Modal>
+        </>}
       </div>
     );
   }

@@ -100,7 +100,9 @@ export async function buildDashboard() {
   const evictionsPendingCount = queryOne(`SELECT COUNT(*) as c FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND l.is_eviction_pending = 1 AND p.is_active = 1`)?.c || 0;
 
   const appsSubmitted = reAppGroups.length;
-  const moveins = reAppGroups.filter(g => /move|approved/i.test(g.status || "")).length;
+  // Move-ins from Buildium: leases that started in the trailing 12 months and aren't Future
+  const moveinsRows = query(`SELECT l.id, l.from_date FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND l.status != 'Future' AND l.from_date >= ? AND l.from_date <= ?`, [yearAgoIso, todayIso]);
+  const moveins = moveinsRows.length;
 
   const leasing = {
     renewalRate: buildKpi(renewalRate, 0, { unit: "%" }),
@@ -284,7 +286,7 @@ export async function buildDashboard() {
     totalUnits: { title: "All units", cols: ["ID", "Property", "Unit", "Occupied"], rows: query("SELECT u.id, u.property_id, u.unit_number, u.is_occupied FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 LIMIT 500").map(u => [String(u.id), propName(u.property_id), u.unit_number || "—", u.is_occupied ? "yes" : "no"]), summary: `${totalUnits} units` },
     vacantNotRented: { title: "Vacant (no future lease)", cols: ["ID", "Property", "Unit"], rows: query(`SELECT u.id, u.property_id, u.unit_number FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND u.is_occupied = 0 AND u.id NOT IN (SELECT DISTINCT unit_id FROM leases WHERE status = 'Future' AND from_date > ?) LIMIT 500`, [todayIso]).map(u => [String(u.id), propName(u.property_id), u.unit_number || "—"]), summary: `${vacantNotRentedCount} vacant` },
     vacantRented: { title: "Vacant with future lease", cols: ["Unit", "Lease starts"], rows: futureLeaseUnitIds.length ? query(`SELECT u.unit_number, l.from_date FROM leases l JOIN units u ON l.unit_id = u.id WHERE l.status = 'Future' AND l.from_date > ? AND u.is_occupied = 0 LIMIT 200`, [todayIso]).map(r => [r.unit_number || "—", r.from_date || "—"]) : [], summary: `${vacantRentedCount} pre-leased` },
-    avgDaysVacant: { title: "Vacant units", cols: ["Unit", "Days"], rows: vacantDaysRows.slice(0, 200).map(r => { const u = queryOne("SELECT unit_number FROM units WHERE id = ?", [r.unit_id]); return [u?.unit_number || String(r.unit_id), String(Math.floor((now - new Date(r.last_end)) / 86400000))]; }), summary: `Avg ${avgDaysVacant} days` },
+    avgDaysVacant: { title: "Vacant units", cols: ["Unit", "Days vacant"], rows: query(`SELECT u.id, u.unit_number, MAX(l.to_date) as last_end FROM units u JOIN properties p ON u.property_id = p.id LEFT JOIN leases l ON l.unit_id = u.id AND l.status = 'Past' WHERE p.is_active = 1 AND u.is_occupied = 0 GROUP BY u.id ORDER BY last_end DESC LIMIT 500`).map(r => [r.unit_number || String(r.id), r.last_end ? String(Math.max(0, Math.floor((now - new Date(r.last_end)) / 86400000))) : "Never rented"]), summary: `Avg ${avgDaysVacant} days · ${vacantUnits} vacant (${vacantDaysRows.length} with prior leases)` },
     doorsAdded: { title: "Doors added", cols: ["Note"], rows: [["Coming soon — owner onboarding tracking is being configured."]], summary: "Under development" },
     doorsLost: { title: "Doors lost", cols: ["Owner", "End date"], rows: ownersLostRows.map(o => [o.name, o.agreement_end || "—"]), summary: `${doorsLost} doors` },
     netDoors: { title: "Net doors", cols: ["Type", "Count"], rows: [["Added", "Coming soon"], ["Lost", String(doorsLost)], ["Net", String(netDoors)]], summary: `Net ${netDoors}` },
@@ -303,7 +305,7 @@ export async function buildDashboard() {
     rentCollectedBy10th: { title: "Rent by 10th", cols: ["Note"], rows: [["Snapshots accumulate over time."]], summary: `${by10th.value}% (${by10th.monthsCounted} months)` },
     newProspects: { title: "Prospects", cols: ["Name", "Source", "Created"], rows: reProspects.slice(-200).reverse().map(p => [p.name || "—", p.source || "—", (p.created_at || "").slice(0, 10)]), summary: `${newProspects} prospects` },
     appsSubmitted: { title: "Applications", cols: ["ID", "Status", "Created"], rows: reAppGroups.slice(-200).reverse().map(g => [String(g.id || g.group_id || ""), g.status || "—", (g.created_at || "").slice(0, 10)]), summary: `${appsSubmitted}` },
-    moveins: { title: "Move-ins", cols: ["ID", "Status"], rows: reAppGroups.filter(g => /move|approved/i.test(g.status || "")).slice(-200).reverse().map(g => [String(g.id || ""), g.status || "—"]), summary: `${moveins}` },
+    moveins: { title: "Move-ins (last 12 mo)", cols: ["Lease", "Start"], rows: moveinsRows.slice(-200).reverse().map(r => [String(r.id), r.from_date || "—"]), summary: `${moveins} move-ins` },
     appsPerMovein: { title: "Funnel", cols: ["Stage", "Count"], rows: [["Apps", String(appsSubmitted)], ["Move-ins", String(moveins)], ["Ratio", moveins ? (appsSubmitted / moveins).toFixed(1) : "—"]], summary: moveins ? `${(appsSubmitted / moveins).toFixed(1)} apps per move-in` : "—" },
     completionRate: notWired("Completion rate", "No showing source."),
     showingsCompleted: notWired("Showings", "No showing source."),
