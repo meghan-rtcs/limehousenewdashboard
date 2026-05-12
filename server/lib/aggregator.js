@@ -212,8 +212,8 @@ export async function buildDashboard() {
     rentCollectedBy10th: buildKpi(by10th.value, 0, { unit: "%" }),
     avgRentPerDoor: buildKpi(avgRentPerLease, 0, { unit: "$" }),
     rpu: buildKpi(rpuValue, 0, { unit: "$" }),
-    grossIncome: buildKpi(Math.round(ytdGross), 0, { unit: "$" }),
-    netIncome: buildKpi(Math.round(ytdNet), 0, { unit: "$" }),
+    grossIncome: buildKpi(ytdGross, 0, { unit: "$", decimals: 2 }),
+    netIncome: buildKpi(ytdNet, 0, { unit: "$", decimals: 2 }),
     delinquent: buildKpi(Math.round(delinquentTotal * 100) / 100, 0, { unit: "$", invertDelta: true }),
     delinquentCount: buildKpi(delinquentCount, 0, { invertDelta: true }),
   };

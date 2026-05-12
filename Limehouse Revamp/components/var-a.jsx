@@ -134,7 +134,7 @@ const VarA = (function() {
   }
 
   // KPI tile — every tile is now drillable (cursor + hover)
-  function KPI({ label, value, unit, delta, spark, sparkColor, source, onClick, big = false, mobile, showSource, accent, live }) {
+  function KPI({ label, value, unit, delta, spark, sparkColor, source, onClick, big = false, mobile, showSource, accent, live, decimals }) {
     const accentColor = accent === 'red' ? '#c0392b' : (accent === 'green' ? '#3d8c1f' : (accent === 'blue' ? '#2471a3' : '#1c2119'));
     return (
       <div onClick={onClick} style={{
@@ -168,7 +168,7 @@ const VarA = (function() {
             fontVariantNumeric: 'tabular-nums',
           }}>
             {unit === '$' && <span style={{ fontSize: '0.55em', color: '#9aa595', fontWeight: 400 }}>$</span>}
-            {typeof value === 'number' ? value.toLocaleString() : value}
+            {typeof value === 'number' ? value.toLocaleString('en-US', decimals != null ? { minimumFractionDigits: decimals, maximumFractionDigits: decimals } : undefined) : value}
             {unit && unit !== '$' && <span style={{ fontSize: '0.55em', color: '#9aa595', fontWeight: 400, marginLeft: 1 }}>{unit}</span>}
           </div>
           {spark && <Sparkline data={spark} color={sparkColor || '#3d8c1f'} width={mobile ? 50 : 60} height={20} />}
@@ -266,6 +266,7 @@ const VarA = (function() {
       sparkColor, big, accent,
       onClick: drillId ? () => setDrillKey(drillId) : undefined,
       live: drillId ? liveSet.has(drillId) : false,
+      decimals: valueObj.decimals,
     });
 
     const healthColors = { 'Healthy':'#3d8c1f','At-risk':'#d68910','Waitlist':'#7d3c98','On Hold':'#2471a3','Off-Market':'#aab5a3' };
@@ -369,7 +370,7 @@ const VarA = (function() {
               />
             </ChartCard>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '3fr 1fr 1fr', gap: mobile ? 8 : 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '3fr 1fr', gap: mobile ? 8 : 10 }}>
             <ChartCard mobile={mobile}
               title="Gross & Net income — YTD"
               subtitle="Monthly totals"
@@ -390,8 +391,10 @@ const VarA = (function() {
                 yFmt={(v) => '$' + Math.round(v / 1000) + 'k'}
               />
             </ChartCard>
-            <KPI {...k('Gross income — YTD', 'BD', SD.financials.grossIncome, '$', 'grossIncome', '#3d8c1f', false, null, 'grossIncome')} mobile={mobile} showSource={showSource} />
-            <KPI {...k('Net income — YTD', 'BD', SD.financials.netIncome, '$', 'netIncome', '#3d8c1f', false, null, 'netIncome')} mobile={mobile} showSource={showSource} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: mobile ? 8 : 10 }}>
+              <KPI {...k('Gross income — YTD', 'BD', SD.financials.grossIncome, '$', 'grossIncome', '#3d8c1f', false, null, 'grossIncome')} mobile={mobile} showSource={showSource} />
+              <KPI {...k('Net income — YTD', 'BD', SD.financials.netIncome, '$', 'netIncome', '#3d8c1f', false, null, 'netIncome')} mobile={mobile} showSource={showSource} />
+            </div>
           </div>
           {(() => {
             const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
