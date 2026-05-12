@@ -169,8 +169,10 @@ export async function buildDashboard() {
   const incSign = NEGATE_INCOME ? "ABS(amount)" : "amount";
   const expSign = NEGATE_EXPENSE ? "ABS(amount)" : "amount";
 
+  // Income tiles + YoY chart read from gl_company_cash — Cash basis, Company
+  // entity only — to match Buildium's "Cash Flow Statement" report exactly.
   const incomeByMonth = months.map(m => {
-    const row = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as gross, SUM(CASE WHEN gl_account_type = 'Expense' THEN ${expSign} ELSE 0 END) as expense FROM gl_entries WHERE date >= ? AND date <= ?`, [m.start, m.end]);
+    const row = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as gross, SUM(CASE WHEN gl_account_type = 'Expense' THEN ${expSign} ELSE 0 END) as expense FROM gl_company_cash WHERE date >= ? AND date <= ?`, [m.start, m.end]);
     const gross = Math.round(row?.gross || 0);
     const expense = Math.round(row?.expense || 0);
     return { month: m.label, gross, net: gross - expense, _expense: expense };
@@ -199,8 +201,8 @@ export async function buildDashboard() {
 
   // YTD income (Jan 1 of current year to today)
   const ytdStart = now.getUTCFullYear() + "-01-01";
-  const ytdGross = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN amount ELSE 0 END) as total FROM gl_entries WHERE date >= ?`, [ytdStart])?.total || 0;
-  const ytdExpense = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Expense' THEN amount ELSE 0 END) as total FROM gl_entries WHERE date >= ?`, [ytdStart])?.total || 0;
+  const ytdGross = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN amount ELSE 0 END) as total FROM gl_company_cash WHERE date >= ?`, [ytdStart])?.total || 0;
+  const ytdExpense = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Expense' THEN amount ELSE 0 END) as total FROM gl_company_cash WHERE date >= ?`, [ytdStart])?.total || 0;
   const ytdNet = ytdGross - ytdExpense;
 
   const financials = {
@@ -282,7 +284,7 @@ export async function buildDashboard() {
   ];
 
   // ── YoY Chart Data ─────────────────────────────────────────────────────
-  const goiYoY = query(`SELECT CAST(strftime('%Y', date) AS INTEGER) as year, CAST(strftime('%m', date) AS INTEGER) as month, SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) - SUM(CASE WHEN gl_account_type = 'Expense' THEN ${expSign} ELSE 0 END) as oi FROM gl_entries GROUP BY year, month ORDER BY year, month`);
+  const goiYoY = query(`SELECT CAST(strftime('%Y', date) AS INTEGER) as year, CAST(strftime('%m', date) AS INTEGER) as month, SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) - SUM(CASE WHEN gl_account_type = 'Expense' THEN ${expSign} ELSE 0 END) as oi FROM gl_company_cash GROUP BY year, month ORDER BY year, month`);
   const goiByYear = {};
   for (const r of goiYoY) { if (!goiByYear[r.year]) goiByYear[r.year] = {}; goiByYear[r.year][r.month] = Math.round(r.oi); }
 

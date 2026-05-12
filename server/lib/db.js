@@ -34,16 +34,36 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_gl_acct ON gl_entries(gl_account_id);
     CREATE INDEX IF NOT EXISTS idx_gl_type ON gl_entries(gl_account_type);
 
-    -- GL accounts reference
+    -- GL accounts reference (parent + sub-accounts, flattened)
     CREATE TABLE IF NOT EXISTS gl_accounts (
       id INTEGER PRIMARY KEY,
       account_number TEXT,
       name TEXT,
       type TEXT,
       sub_type TEXT,
+      parent_id INTEGER,
       is_active INTEGER DEFAULT 1,
       synced_at TEXT
     );
+
+    -- Cash-basis GL entries scoped to the management Company entity only.
+    -- This mirrors the Buildium "Cash Flow Statement" report and is what
+    -- the income tiles + YoY chart read from. (gl_entries above is the
+    -- accrual all-entities feed used elsewhere.)
+    CREATE TABLE IF NOT EXISTS gl_company_cash (
+      id INTEGER NOT NULL,
+      gl_account_id INTEGER NOT NULL,
+      gl_account_name TEXT,
+      gl_account_type TEXT,
+      date TEXT NOT NULL,
+      amount REAL NOT NULL,
+      description TEXT,
+      transaction_type TEXT,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (id, gl_account_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_gcc_date ON gl_company_cash(date);
+    CREATE INDEX IF NOT EXISTS idx_gcc_type ON gl_company_cash(gl_account_type);
 
     -- Daily metric snapshots (for YoY + rent collection)
     CREATE TABLE IF NOT EXISTS daily_snapshots (
@@ -165,6 +185,12 @@ function migrate(db) {
       details TEXT
     );
   `);
+
+  // Idempotent column adds for existing DBs
+  const cols = db.prepare("PRAGMA table_info(gl_accounts)").all().map(c => c.name);
+  if (!cols.includes("parent_id")) {
+    db.exec("ALTER TABLE gl_accounts ADD COLUMN parent_id INTEGER");
+  }
 }
 
 // ── Helper functions ─────────────────────────────────────────────────────────

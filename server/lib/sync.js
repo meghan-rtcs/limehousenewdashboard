@@ -13,21 +13,145 @@ function safe(promise, fallback) {
 }
 
 // ── GL Accounts ──────────────────────────────────────────────────────────────
+// Flattens parents + sub-accounts. Sub-accounts inherit Type/SubType from
+// their parent (Buildium's report endpoints expect every leaf account id).
 async function syncGLAccounts() {
   const accounts = await buildium.listGLAccounts();
   const now = TS();
+  const rows = [];
+  function walk(a, parent = null) {
+    const type = a.Type || parent?.type || null;
+    const subType = a.SubType || parent?.sub_type || null;
+    const row = {
+      id: a.Id,
+      account_number: a.AccountNumber,
+      name: parent ? `${parent.name} - ${a.Name}` : a.Name,
+      type,
+      sub_type: subType,
+      parent_id: parent?.id || null,
+      is_active: a.IsActive ? 1 : 0,
+      synced_at: now,
+    };
+    rows.push(row);
+    for (const sub of (a.SubAccounts || [])) walk(sub, row);
+  }
+  for (const a of accounts) walk(a);
   clearTable("gl_accounts");
-  upsertMany("gl_accounts", accounts.map((a) => ({
-    id: a.Id,
-    account_number: a.AccountNumber,
-    name: a.Name,
-    type: a.Type,
-    sub_type: a.SubType,
-    is_active: a.IsActive ? 1 : 0,
-    synced_at: now,
-  })), ["id", "account_number", "name", "type", "sub_type", "is_active", "synced_at"]);
-  console.log(`[sync] GL accounts: ${accounts.length}`);
+  upsertMany("gl_accounts", rows, ["id", "account_number", "name", "type", "sub_type", "parent_id", "is_active", "synced_at"]);
+  console.log(`[sync] GL accounts: ${rows.length} (${accounts.length} parents + ${rows.length - accounts.length} sub-accounts)`);
   return accounts;
+}
+
+// ── Company entity discovery (cached) ────────────────────────────────────────
+// The Cash Flow Statement and other company-level reports require the
+// internal "Company" entity id. It's not exposed via /administration/account
+// (that returns a different account id), so we sniff it from a journal line.
+let _companyEntityId = null;
+async function getCompanyEntityId() {
+  if (_companyEntityId) return _companyEntityId;
+  // Probe a recent month for any journal line with AccountingEntity.Type = 'Company'
+  const today = new Date();
+  for (let monthsBack = 0; monthsBack < 12; monthsBack++) {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - monthsBack, 1));
+    const start = fmtDate(d);
+    const end = fmtDate(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)));
+    const glIds = query("SELECT id FROM gl_accounts").map(r => r.id);
+    if (!glIds.length) break;
+    try {
+      const txs = await buildium.listGLTransactions({ startdate: start, enddate: end, glaccountids: glIds.slice(0, 50) });
+      for (const t of txs) {
+        for (const ln of (t.Journal?.Lines || [])) {
+          const ae = ln.AccountingEntity;
+          if (ae && ae.AccountingEntityType === "Company") {
+            _companyEntityId = ae.Id;
+            console.log(`[sync] Discovered Company entityId = ${ae.Id}`);
+            return ae.Id;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`[sync] company entity probe ${start}→${end}:`, e.message);
+    }
+  }
+  console.warn("[sync] Could not discover Company entityId from journal lines");
+  return null;
+}
+
+// ── GL Company-Cash entries (Cash basis, Company entity only) ────────────────
+// This is the source of truth for the gross/net income tiles + YoY chart.
+// Mirrors what Buildium's "Cash Flow Statement" report shows.
+async function syncGLCompanyCash(startdate, enddate) {
+  const companyId = await getCompanyEntityId();
+  if (!companyId) {
+    // Hard-fail so syncAll records this as partial — don't silently leave
+    // tiles stale.
+    throw new Error("Company entityId not discoverable from journal lines");
+  }
+  const glAccounts = query("SELECT id, name, type FROM gl_accounts");
+  if (!glAccounts.length) return 0;
+  const acctMap = new Map(glAccounts.map(a => [a.id, a]));
+  const glAccountIds = glAccounts.map(a => a.id);
+
+  console.log(`[sync] Pulling Company-Cash GL: ${startdate} → ${enddate}`);
+  const report = await buildium.getGLReport({
+    accountingbasis: "Cash",
+    entitytype: "Company",
+    entityid: companyId,
+    startdate,
+    enddate,
+    glaccountids: glAccountIds,
+  });
+
+  const now = TS();
+  const rows = [];
+  for (const item of report) {
+    const acct = acctMap.get(item.GLAccountId);
+    if (!acct) continue;
+    for (const e of (item.Entries || [])) {
+      rows.push({
+        id: e.Id,
+        gl_account_id: item.GLAccountId,
+        gl_account_name: acct.name,
+        gl_account_type: acct.type,
+        date: (e.Date || "").slice(0, 10),
+        amount: e.Amount ?? 0,
+        description: e.Description || "",
+        transaction_type: e.TransactionType || "",
+        synced_at: now,
+      });
+    }
+  }
+  // Delete the date window first so reclassifications/deletions in Buildium
+  // don't leave orphan rows behind. Composite PK upsert can't catch those.
+  run("DELETE FROM gl_company_cash WHERE date >= ? AND date <= ?", [startdate, enddate]);
+  if (rows.length) {
+    upsertMany("gl_company_cash", rows, [
+      "id", "gl_account_id", "gl_account_name", "gl_account_type",
+      "date", "amount", "description", "transaction_type", "synced_at",
+    ]);
+  }
+  console.log(`[sync] Company-Cash GL: ${rows.length} rows (${startdate} → ${enddate})`);
+  return rows.length;
+}
+
+// Backfill Company-Cash from a starting year, splitting by month for safety.
+export async function backfillGLCompanyCash(fromYear = 2018) {
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  let total = 0;
+  for (let year = fromYear; year <= currentYear; year++) {
+    for (let m = 1; m <= 12; m++) {
+      const ms = `${year}-${String(m).padStart(2, "0")}-01`;
+      if (new Date(ms) > now) break;
+      const last = new Date(year, m, 0).getDate();
+      const meRaw = `${year}-${String(m).padStart(2, "0")}-${last}`;
+      const me = new Date(meRaw) > now ? fmtDate(now) : meRaw;
+      try { total += await syncGLCompanyCash(ms, me); }
+      catch (e) { console.warn(`[sync] company-cash ${ms}→${me}:`, e.message); }
+    }
+  }
+  console.log(`[sync] Company-Cash backfill complete: ${total} entries`);
+  return total;
 }
 
 // ── GL Entries (historical) ──────────────────────────────────────────────────
@@ -380,6 +504,37 @@ export async function syncAll(type = "full") {
           }
         }
       }
+    }
+
+    // 5. Company-Cash GL — source of truth for income tiles + YoY chart.
+    //    Mirrors Buildium's "Cash Flow Statement" report (Cash basis, Company entity).
+    const lastCCDate = queryOne("SELECT MAX(date) as d FROM gl_company_cash")?.d;
+    try {
+      if (!lastCCDate) {
+        await backfillGLCompanyCash(2018);
+      } else {
+        // Re-pull the last 2 months to catch any new postings, reclassifications, or deletions
+        const start = new Date(lastCCDate);
+        start.setMonth(start.getMonth() - 1);
+        start.setDate(1);
+        let d = new Date(start);
+        let chunkErrors = 0;
+        while (d <= new Date()) {
+          const ms = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+          const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+          const meRaw = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${last}`;
+          const me = new Date(meRaw) > new Date() ? glEnd : meRaw;
+          try { await syncGLCompanyCash(ms, me); }
+          catch (e) { console.warn(`[sync] company-cash ${ms}→${me}:`, e.message); chunkErrors++; }
+          d.setMonth(d.getMonth() + 1);
+        }
+        if (chunkErrors > 0) errors.push(`company-cash GL: ${chunkErrors} chunk(s) failed`);
+      }
+    } catch (e) {
+      // Surfaces e.g. missing company entityId so syncAll records partial status
+      // and the dashboard's sync banner shows the problem.
+      errors.push(`company-cash GL: ${e.message}`);
+      console.warn("[sync] company-cash failed:", e.message);
     }
 
     totalRecords = query("SELECT (SELECT COUNT(*) FROM units) + (SELECT COUNT(*) FROM leases) + (SELECT COUNT(*) FROM gl_entries) as total")[0]?.total || 0;
