@@ -391,7 +391,7 @@ const VarA = (function() {
                 yFmt={(v) => '$' + Math.round(v / 1000) + 'k'}
               />
             </ChartCard>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: mobile ? 8 : 10 }}>
+            <div style={{ display: 'grid', gridTemplateRows: '1fr 1fr', gap: mobile ? 8 : 10, minHeight: 0 }}>
               <KPI {...k('Gross income — YTD', 'BD', SD.financials.grossIncome, '$', 'grossIncome', '#3d8c1f', false, null, 'grossIncome')} mobile={mobile} showSource={showSource} />
               <KPI {...k('Net income — YTD', 'BD', SD.financials.netIncome, '$', 'netIncome', '#3d8c1f', false, null, 'netIncome')} mobile={mobile} showSource={showSource} />
             </div>

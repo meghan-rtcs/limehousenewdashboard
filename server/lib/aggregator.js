@@ -278,7 +278,18 @@ export async function buildDashboard() {
   }));
   const doorsMonthly = months.map(m => ({ month: m.label, added: 0, lost: 0 }));
   const renewalsByMonth = months.map((m, i) => ({ month: m.label, count: renewalsByMonthCount[i] || 0 }));
-  const occupancyTrend = months.map(m => ({ month: m.label, rate: occupancy.rate.value }));
+  // Occupancy trend — for each month use the latest snapshot taken on or
+  // before that month's end (so the line steps with real changes). Months
+  // before any snapshot fall back to the earliest snapshot's rate so the
+  // chart isn't broken; once historical snapshots accumulate the line will
+  // reflect actual month-by-month movement.
+  const earliestSnap = queryOne(`SELECT total_units, occupied_units FROM daily_snapshots WHERE total_units > 0 ORDER BY date ASC LIMIT 1`);
+  const earliestRate = earliestSnap ? Math.round((earliestSnap.occupied_units / earliestSnap.total_units) * 1000) / 10 : occupancy.rate.value;
+  const occupancyTrend = months.map(m => {
+    const snap = queryOne(`SELECT total_units, occupied_units FROM daily_snapshots WHERE date <= ? AND total_units > 0 ORDER BY date DESC LIMIT 1`, [m.end]);
+    const rate = snap ? Math.round((snap.occupied_units / snap.total_units) * 1000) / 10 : earliestRate;
+    return { month: m.label, rate };
+  });
   const delinquentTrend = months.map(m => ({ month: m.label, amount: +(financials.delinquent.value / 1000).toFixed(1) }));
 
   // Aging buckets from latest outstanding snapshot
