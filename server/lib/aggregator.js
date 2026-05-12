@@ -171,10 +171,12 @@ export async function buildDashboard() {
 
   // Income tiles + YoY chart read from gl_company_cash — Cash basis, Company
   // entity only — to match Buildium's "Cash Flow Statement" report exactly.
+  // Keep raw cents end-to-end — rounding each month and then summing causes
+  // the drilldown total to drift a few dollars off the tile and off Buildium.
   const incomeByMonth = months.map(m => {
     const row = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as gross, SUM(CASE WHEN gl_account_type = 'Expense' THEN ${expSign} ELSE 0 END) as expense FROM gl_company_cash WHERE date >= ? AND date <= ?`, [m.start, m.end]);
-    const gross = Math.round(row?.gross || 0);
-    const expense = Math.round(row?.expense || 0);
+    const gross = +(row?.gross || 0);
+    const expense = +(row?.expense || 0);
     return { month: m.label, gross, net: gross - expense, _expense: expense };
   });
   const grossIncomeTotal = incomeByMonth.reduce((s, m) => s + m.gross, 0);
