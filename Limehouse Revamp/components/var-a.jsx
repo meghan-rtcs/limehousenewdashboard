@@ -444,7 +444,7 @@ const VarA = (function() {
                     yFmt={(v) => '$' + v}
                   />
                 </ChartCard>
-                <KPI {...k('Average RPU — YTD', 'BD', SD.financials.rpu, '$', 'rpu', '#3d8c1f', false, null, 'rpu')} mobile={mobile} showSource={showSource} />
+                <KPI {...k('RPU — last month', 'BD', SD.financials.rpu, '$', 'rpu', '#3d8c1f', false, null, 'rpu')} mobile={mobile} showSource={showSource} />
               </div>
             );
           })()}
