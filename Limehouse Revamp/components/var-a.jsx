@@ -390,8 +390,8 @@ const VarA = (function() {
                 yFmt={(v) => '$' + Math.round(v / 1000) + 'k'}
               />
             </ChartCard>
-            <KPI {...k('Gross income', 'BD', SD.financials.grossIncome, '$', 'grossIncome', '#3d8c1f', false, null, 'grossIncome')} mobile={mobile} showSource={showSource} />
-            <KPI {...k('Net income', 'BD', SD.financials.netIncome, '$', 'netIncome', '#3d8c1f', false, null, 'netIncome')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Gross income — YTD', 'BD', SD.financials.grossIncome, '$', 'grossIncome', '#3d8c1f', false, null, 'grossIncome')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Net income — YTD', 'BD', SD.financials.netIncome, '$', 'netIncome', '#3d8c1f', false, null, 'netIncome')} mobile={mobile} showSource={showSource} />
           </div>
           {(() => {
             const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -441,7 +441,7 @@ const VarA = (function() {
                     yFmt={(v) => '$' + v}
                   />
                 </ChartCard>
-                <KPI {...k('Revenue / unit', 'BD', SD.financials.rpu, '$', 'rpu', '#3d8c1f', false, null, 'rpu')} mobile={mobile} showSource={showSource} />
+                <KPI {...k('Average RPU — YTD', 'BD', SD.financials.rpu, '$', 'rpu', '#3d8c1f', false, null, 'rpu')} mobile={mobile} showSource={showSource} />
               </div>
             );
           })()}

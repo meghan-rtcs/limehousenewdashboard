@@ -182,54 +182,101 @@ function DrillTable({ cols, rows }) {
 }
 
 // ── Mini bar chart (for income trends, etc.) ────────────────────────────────
-function MiniBars({ data, color = '#3d8c1f', height = 60, valueKey = 'value', highlightLast = true }) {
+function MiniBars({ data, color = '#3d8c1f', height = 60, valueKey = 'value', highlightLast = true, valueFmt = (v) => (v ?? 0).toLocaleString() }) {
+  const [hover, setHover] = useState(null);
   const values = data.map(d => d[valueKey]);
   const max = Math.max(...values, 1);
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height }}>
-      {data.map((d, i) => {
-        const h = (d[valueKey] / max) * height;
-        const isLast = highlightLast && i === data.length - 1;
-        return (
-          <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-            <div style={{
-              width: '100%', height: h, minHeight: 2,
-              background: isLast ? color : color + '55',
-              borderRadius: '3px 3px 0 0',
-            }} />
-          </div>
-        );
-      })}
+    <div style={{ position: 'relative' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height }}>
+        {data.map((d, i) => {
+          const h = (d[valueKey] / max) * height;
+          const isLast = highlightLast && i === data.length - 1;
+          const isHover = hover === i;
+          return (
+            <div key={i}
+              onMouseEnter={() => setHover(i)}
+              onMouseLeave={() => setHover(null)}
+              style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, cursor: 'crosshair' }}>
+              <div style={{
+                width: '100%', height: h, minHeight: 2,
+                background: isHover ? '#1c2119' : (isLast ? color : color + '55'),
+                borderRadius: '3px 3px 0 0',
+                transition: 'background .12s',
+              }} />
+            </div>
+          );
+        })}
+      </div>
+      {hover != null && data[hover] && (
+        <div style={{
+          position: 'absolute', bottom: height + 6,
+          left: `calc(${((hover + 0.5) / data.length) * 100}% - 50px)`,
+          width: 100, textAlign: 'center',
+          background: '#1c2119', color: '#fff', padding: '5px 8px', borderRadius: 5,
+          fontSize: 11.5, fontVariantNumeric: 'tabular-nums', pointerEvents: 'none',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.18)', zIndex: 5,
+        }}>
+          <div style={{ fontSize: 10, color: '#9aa595', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>{data[hover].month || data[hover].label || ''}</div>
+          <div style={{ fontWeight: 600 }}>{valueFmt(data[hover][valueKey])}</div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ── Dual-bar chart (added vs lost, by3rd vs by10th) ─────────────────────────
-function DualBars({ data, keys, colors, height = 90, labels = true, yMax }) {
+function DualBars({ data, keys, colors, height = 90, labels = true, yMax, valueFmt = (v) => (v ?? 0).toLocaleString() }) {
+  const [hover, setHover] = useState(null);
   const allValues = data.flatMap(d => keys.map(k => d[k]));
   const max = yMax ?? Math.max(...allValues, 1);
   return (
-    <div>
+    <div style={{ position: 'relative' }}>
       <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height }}>
-        {data.map((d, i) => (
-          <div key={i} style={{ flex: 1, display: 'flex', alignItems: 'flex-end', gap: 1, height: '100%' }}>
-            {keys.map((k, ki) => {
-              const h = (d[k] / max) * height;
-              return (
-                <div key={ki} style={{
-                  flex: 1, height: Math.max(h, 1.5), minHeight: 1.5,
-                  background: colors[ki],
-                  borderRadius: '2px 2px 0 0',
-                }} />
-              );
-            })}
-          </div>
-        ))}
+        {data.map((d, i) => {
+          const isHover = hover === i;
+          return (
+            <div key={i}
+              onMouseEnter={() => setHover(i)}
+              onMouseLeave={() => setHover(null)}
+              style={{ flex: 1, display: 'flex', alignItems: 'flex-end', gap: 1, height: '100%', cursor: 'crosshair', background: isHover ? 'rgba(28,33,25,0.05)' : 'transparent', borderRadius: 3, transition: 'background .12s' }}>
+              {keys.map((k, ki) => {
+                const h = (d[k] / max) * height;
+                return (
+                  <div key={ki} style={{
+                    flex: 1, height: Math.max(h, 1.5), minHeight: 1.5,
+                    background: colors[ki],
+                    borderRadius: '2px 2px 0 0',
+                  }} />
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
       {labels && (
-        <div style={{ display: 'flex', gap: 4, marginTop: 4, fontSize: 9, color: '#9aa595' }}>
+        <div style={{ display: 'flex', gap: 4, marginTop: 4, fontSize: 11, color: '#1c2119', fontWeight: 500 }}>
           {data.map((d, i) => (
             <div key={i} style={{ flex: 1, textAlign: 'center' }}>{d.month?.[0]}</div>
+          ))}
+        </div>
+      )}
+      {hover != null && data[hover] && (
+        <div style={{
+          position: 'absolute', bottom: height + 14,
+          left: `calc(${((hover + 0.5) / data.length) * 100}% - 60px)`,
+          width: 120, background: '#1c2119', color: '#fff',
+          padding: '7px 10px', borderRadius: 6, fontSize: 12, lineHeight: 1.45,
+          fontVariantNumeric: 'tabular-nums', pointerEvents: 'none',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.18)', zIndex: 5,
+        }}>
+          <div style={{ fontSize: 10, color: '#9aa595', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 3 }}>{data[hover].month || data[hover].label || ''}</div>
+          {keys.map((k, ki) => (
+            <div key={ki} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: colors[ki] }} />
+              <span style={{ flex: 1, fontWeight: 500 }}>{k}</span>
+              <span style={{ fontWeight: 600 }}>{valueFmt(data[hover][k])}</span>
+            </div>
           ))}
         </div>
       )}
@@ -316,7 +363,7 @@ function DashHeader({ syncedAt, range, onRangeChange, dense, mobile }) {
 }
 
 // ── Multi-line chart with axes (for trends) ────────────────────────────────
-function LineChart({ data, series, height = 140, padding = { l: 32, r: 8, t: 8, b: 18 }, yFmt = (v) => v, showGrid = true }) {
+function LineChart({ data, series, height = 140, padding = { l: 44, r: 12, t: 10, b: 22 }, yFmt = (v) => v, showGrid = true }) {
   const W = 600;  // viewBox width; SVG scales to container
   const H = height;
   const labels = data.map(d => d.month || d.label || '');
@@ -335,46 +382,121 @@ function LineChart({ data, series, height = 140, padding = { l: 32, r: 8, t: 8, 
   // Y-axis ticks (4 lines)
   const ticks = [0, 0.33, 0.66, 1].map(t => yMin + range * t);
 
+  // Hover state: which x-index the cursor is on
+  const [hoverIdx, setHoverIdx] = useState(null);
+  const svgRef = useRef(null);
+
+  function onMove(e) {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    // Map client x → viewBox x (since preserveAspectRatio=none stretches)
+    const vbX = ((e.clientX - rect.left) / rect.width) * W;
+    const idx = Math.round((vbX - padding.l) / xStep);
+    const clamped = Math.max(0, Math.min(data.length - 1, idx));
+    setHoverIdx(clamped);
+  }
+
+  // Tooltip layout (rendered in HTML overlay so text isn't stretched by viewBox)
+  let tooltip = null;
+  if (hoverIdx != null && data[hoverIdx]) {
+    const row = data[hoverIdx];
+    const visibleSeries = series.filter(s => row[s.key] != null && Number.isFinite(row[s.key]));
+    if (visibleSeries.length) {
+      // Position as % of width so it tracks the SVG resize
+      const xPct = (xScale(hoverIdx) / W) * 100;
+      const onRightHalf = xPct > 60;
+      tooltip = (
+        <div style={{
+          position: 'absolute',
+          left: onRightHalf ? 'auto' : `calc(${xPct}% + 8px)`,
+          right: onRightHalf ? `calc(${100 - xPct}% + 8px)` : 'auto',
+          top: 6,
+          background: '#1c2119',
+          color: '#fff',
+          padding: '7px 10px',
+          borderRadius: 6,
+          fontSize: 12,
+          lineHeight: 1.45,
+          fontVariantNumeric: 'tabular-nums',
+          whiteSpace: 'nowrap',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+          pointerEvents: 'none',
+          zIndex: 5,
+        }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#9aa595', marginBottom: 4 }}>
+            {labels[hoverIdx] || ''}
+          </div>
+          {visibleSeries.map((s, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color, opacity: s.opacity ?? 1 }} />
+              <span style={{ flex: 1, fontWeight: 500 }}>{s.key}</span>
+              <span style={{ fontWeight: 600 }}>{yFmt(row[s.key])}</span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+  }
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: '100%', height: H, display: 'block', overflow: 'visible' }}>
-      {showGrid && ticks.map((t, i) => (
-        <g key={i}>
-          <line x1={padding.l} y1={yScale(t)} x2={W - padding.r} y2={yScale(t)}
-            stroke="#eef0ec" strokeWidth="1" strokeDasharray={i === 0 ? '0' : '2 3'} />
-          <text x={padding.l - 4} y={yScale(t) + 3} fontSize="9" fill="#9aa595" textAnchor="end" fontFamily="'Outfit', sans-serif">{yFmt(Math.round(t))}</text>
-        </g>
-      ))}
-      {labels.map((l, i) => (
-        <text key={i} x={xScale(i)} y={H - 4} fontSize="9" fill="#9aa595" textAnchor="middle" fontFamily="'Outfit', sans-serif">{l[0]}</text>
-      ))}
-      {series.map((s, si) => {
-        // Build segments split on null/undefined so missing months don't draw spurious lines.
-        const segs = [];
-        let cur = [];
-        data.forEach((d, i) => {
-          const v = d[s.key];
-          if (v == null || !Number.isFinite(v)) {
-            if (cur.length) { segs.push(cur); cur = []; }
-          } else {
-            cur.push([xScale(i), yScale(v)]);
-          }
-        });
-        if (cur.length) segs.push(cur);
-        const allPts = segs.flat();
-        const sw = s.width || 1.8;
-        return (
-          <g key={si}>
-            {segs.map((pts, j) => {
-              const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
-              return <path key={j} d={path} fill="none" stroke={s.color} strokeWidth={sw} strokeOpacity={s.opacity ?? 1} strokeLinecap="round" strokeLinejoin="round" strokeDasharray={s.dash || '0'} />;
-            })}
-            {s.dots !== false && allPts.map((p, i) => (
-              <circle key={i} cx={p[0]} cy={p[1]} r={i === allPts.length - 1 ? 2.4 : 1.4} fill={s.color} fillOpacity={s.opacity ?? 1} />
-            ))}
+    <div style={{ position: 'relative', width: '100%' }}>
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+        onMouseMove={onMove}
+        onMouseLeave={() => setHoverIdx(null)}
+        style={{ width: '100%', height: H, display: 'block', overflow: 'visible', cursor: 'crosshair' }}>
+        {showGrid && ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={padding.l} y1={yScale(t)} x2={W - padding.r} y2={yScale(t)}
+              stroke="#e5e8e2" strokeWidth="1" strokeDasharray={i === 0 ? '0' : '2 3'} />
+            <text x={padding.l - 6} y={yScale(t) + 4} fontSize="11" fill="#1c2119" textAnchor="end" fontFamily="'Outfit', sans-serif" fontWeight="500">{yFmt(Math.round(t))}</text>
           </g>
-        );
-      })}
-    </svg>
+        ))}
+        {labels.map((l, i) => (
+          <text key={i} x={xScale(i)} y={H - 4} fontSize="11" fill="#1c2119" textAnchor="middle" fontFamily="'Outfit', sans-serif" fontWeight="500">{l[0]}</text>
+        ))}
+        {series.map((s, si) => {
+          // Build segments split on null/undefined so missing months don't draw spurious lines.
+          const segs = [];
+          let cur = [];
+          data.forEach((d, i) => {
+            const v = d[s.key];
+            if (v == null || !Number.isFinite(v)) {
+              if (cur.length) { segs.push(cur); cur = []; }
+            } else {
+              cur.push([xScale(i), yScale(v), i]);
+            }
+          });
+          if (cur.length) segs.push(cur);
+          const allPts = segs.flat();
+          const sw = s.width || 1.8;
+          return (
+            <g key={si}>
+              {segs.map((pts, j) => {
+                const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+                return <path key={j} d={path} fill="none" stroke={s.color} strokeWidth={sw} strokeOpacity={s.opacity ?? 1} strokeLinecap="round" strokeLinejoin="round" strokeDasharray={s.dash || '0'} />;
+              })}
+              {s.dots !== false && allPts.map((p, i) => (
+                <circle key={i} cx={p[0]} cy={p[1]} r={i === allPts.length - 1 ? 2.4 : 1.4} fill={s.color} fillOpacity={s.opacity ?? 1} />
+              ))}
+            </g>
+          );
+        })}
+        {/* Hover guideline + emphasized point */}
+        {hoverIdx != null && (
+          <g pointerEvents="none">
+            <line x1={xScale(hoverIdx)} y1={padding.t} x2={xScale(hoverIdx)} y2={H - padding.b}
+              stroke="#1c2119" strokeWidth="1" strokeOpacity="0.25" strokeDasharray="3 3" />
+            {series.map((s, si) => {
+              const v = data[hoverIdx]?.[s.key];
+              if (v == null || !Number.isFinite(v)) return null;
+              return <circle key={si} cx={xScale(hoverIdx)} cy={yScale(v)} r="3.2" fill="#fff" stroke={s.color} strokeWidth="2" />;
+            })}
+          </g>
+        )}
+      </svg>
+      {tooltip}
+    </div>
   );
 }
 
