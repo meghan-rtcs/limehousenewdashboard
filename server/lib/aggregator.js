@@ -261,7 +261,21 @@ export async function buildDashboard() {
   };
 
   // ── CHART DATA ─────────────────────────────────────────────────────────
-  const rentCollectionByMonth = months.map(m => ({ month: m.label, by3rd: 0, by10th: 0 }));
+  // Per-month rent collection — pulled from the same daily_snapshots source
+  // that drives the by-3rd / by-10th KPI tiles. For each month we look for a
+  // snapshot taken on day N..N+5 (matches rentByDay window) and use it as the
+  // "% paid by day N" reading. Months with no snapshot stay at 0.
+  function rentMonth(monthStart, N) {
+    const prefix = monthStart.slice(0, 7); // YYYY-MM
+    const snap = queryOne(`SELECT * FROM daily_snapshots WHERE date LIKE ? AND CAST(substr(date, 9, 2) AS INTEGER) BETWEEN ? AND ? ORDER BY date ASC LIMIT 1`, [`${prefix}%`, N, N + 5]);
+    if (!snap || !snap.active_leases) return 0;
+    return Math.round((snap.paid_lease_count / snap.active_leases) * 1000) / 10;
+  }
+  const rentCollectionByMonth = months.map(m => ({
+    month: m.label,
+    by3rd: rentMonth(m.start, 3),
+    by10th: rentMonth(m.start, 10),
+  }));
   const doorsMonthly = months.map(m => ({ month: m.label, added: 0, lost: 0 }));
   const renewalsByMonth = months.map((m, i) => ({ month: m.label, count: renewalsByMonthCount[i] || 0 }));
   const occupancyTrend = months.map(m => ({ month: m.label, rate: occupancy.rate.value }));
