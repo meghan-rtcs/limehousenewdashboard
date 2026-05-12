@@ -182,11 +182,11 @@ export async function buildDashboard() {
   const grossIncomeTotal = incomeByMonth.reduce((s, m) => s + m.gross, 0);
   const netIncomeTotal = incomeByMonth.reduce((s, m) => s + m.net, 0);
 
-  // RPU = last complete month total operating income (rent + ancillary) / units.
-  // Excludes only non-recurring/refundable items so the per-door figure reflects
-  // steady operating revenue.
+  // RPU = last complete month total income / units. Pulls from gl_company_cash
+  // (the same Cash-basis Company-entity source as the Gross income tile) so the
+  // numerator equals that month's reported gross income exactly.
   const lcm = months.length >= 2 ? months[months.length - 2] : months[0]; // last complete month
-  const rpuIncome = lcm ? (queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' AND gl_account_name NOT IN ('Deposits to be Refunded - Income','Insurance Claim','Owner - Non Refundable Pet Fee','Interest Income') THEN ABS(amount) ELSE 0 END) as inc FROM gl_entries WHERE date >= ? AND date <= ?`, [lcm.start, lcm.end])?.inc || 0) : 0;
+  const rpuIncome = lcm ? (queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as inc FROM gl_company_cash WHERE date >= ? AND date <= ?`, [lcm.start, lcm.end])?.inc || 0) : 0;
   const rpuValue = totalUnits ? Math.round(rpuIncome / totalUnits) : 0;
 
   // Rent collection by Nth (from daily_snapshots)
@@ -317,9 +317,9 @@ export async function buildDashboard() {
   const goiByYear = {};
   for (const r of goiYoY) { if (!goiByYear[r.year]) goiByYear[r.year] = {}; goiByYear[r.year][r.month] = Math.round(r.oi); }
 
-  // RPU YoY uses the same operating-revenue exclusions as the RPU tile so the
-  // line chart and the tile agree (both = PM operating revenue per unit).
-  const rpuYoY = query(`SELECT CAST(strftime('%Y', date) AS INTEGER) as year, CAST(strftime('%m', date) AS INTEGER) as month, SUM(CASE WHEN gl_account_type = 'Income' AND gl_account_name NOT IN ('Deposits to be Refunded - Income','Insurance Claim','Owner - Non Refundable Pet Fee','Interest Income') THEN ABS(amount) ELSE 0 END) as inc FROM gl_entries GROUP BY year, month ORDER BY year, month`);
+  // RPU YoY uses the same gl_company_cash source as the RPU tile so the line
+  // chart and the tile agree (both = company gross income per unit).
+  const rpuYoY = query(`SELECT CAST(strftime('%Y', date) AS INTEGER) as year, CAST(strftime('%m', date) AS INTEGER) as month, SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as inc FROM gl_company_cash GROUP BY year, month ORDER BY year, month`);
   const rpuByYear = {};
   for (const r of rpuYoY) {
     if (!rpuByYear[r.year]) rpuByYear[r.year] = {};
