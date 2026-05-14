@@ -376,7 +376,8 @@ const VarA = (function() {
             // a value for every year that has data for that month.
             const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
             const palette = ['#d6dbd1','#c2cbbb','#aebaa3','#9aa88c','#869676','#728560','#5e7449','#456020','#3d8c1f'];
-            const buildYoY = (byYear, currentColor) => {
+            const buildYoY = (byYear, _currentColor) => {
+              const currentColor = '#2471a3';
               const yrs = Object.keys(byYear || {}).map(Number).sort((a, b) => a - b);
               const curY = yrs[yrs.length - 1];
               const data = monthLabels.map((label, i) => {
