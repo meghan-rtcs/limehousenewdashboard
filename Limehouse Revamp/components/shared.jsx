@@ -440,20 +440,14 @@ function LineChart({ data, series, height = 140, padding = { l: 44, r: 12, t: 10
   }
 
   return (
-    <div style={{ position: 'relative', width: '100%' }}>
+    <div style={{ position: 'relative', width: '100%', fontFamily: "'Outfit', sans-serif" }}>
       <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
         onMouseMove={onMove}
         onMouseLeave={() => setHoverIdx(null)}
         style={{ width: '100%', height: H, display: 'block', overflow: 'visible', cursor: 'crosshair' }}>
         {showGrid && ticks.map((t, i) => (
-          <g key={i}>
-            <line x1={padding.l} y1={yScale(t)} x2={W - padding.r} y2={yScale(t)}
-              stroke="#e5e8e2" strokeWidth="1" strokeDasharray={i === 0 ? '0' : '2 3'} />
-            <text x={padding.l - 6} y={yScale(t) + 4} fontSize="11" fill="#1c2119" textAnchor="end" fontFamily="'Outfit', sans-serif" fontWeight="500">{yFmt(Math.round(t))}</text>
-          </g>
-        ))}
-        {labels.map((l, i) => (
-          <text key={i} x={xScale(i)} y={H - 4} fontSize="11" fill="#1c2119" textAnchor="middle" fontFamily="'Outfit', sans-serif" fontWeight="500">{l[0]}</text>
+          <line key={i} x1={padding.l} y1={yScale(t)} x2={W - padding.r} y2={yScale(t)}
+            stroke="#e5e8e2" strokeWidth="1" strokeDasharray={i === 0 ? '0' : '2 3'} />
         ))}
         {series.map((s, si) => {
           // Build segments split on null/undefined so missing months don't draw spurious lines.
@@ -495,6 +489,31 @@ function LineChart({ data, series, height = 140, padding = { l: 44, r: 12, t: 10
           </g>
         )}
       </svg>
+      {/* Axis labels rendered as HTML overlay so the SVG's preserveAspectRatio="none"
+          stretching doesn't distort the text. */}
+      {showGrid && ticks.map((t, i) => (
+        <div key={'y'+i} style={{
+          position: 'absolute',
+          left: 0,
+          width: padding.l - 6,
+          top: `${(yScale(t) / H) * 100}%`,
+          transform: 'translateY(-50%)',
+          textAlign: 'right',
+          fontSize: 11, fontWeight: 500, color: '#1c2119',
+          fontVariantNumeric: 'tabular-nums',
+          pointerEvents: 'none',
+        }}>{yFmt(Math.round(t))}</div>
+      ))}
+      {labels.map((l, i) => (
+        <div key={'x'+i} style={{
+          position: 'absolute',
+          left: `${(xScale(i) / W) * 100}%`,
+          bottom: 0,
+          transform: 'translateX(-50%)',
+          fontSize: 11, fontWeight: 500, color: '#1c2119',
+          pointerEvents: 'none',
+        }}>{l[0]}</div>
+      ))}
       {tooltip}
     </div>
   );
