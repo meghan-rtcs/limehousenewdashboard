@@ -313,9 +313,17 @@ export async function buildDashboard() {
   ];
 
   // ── YoY Chart Data ─────────────────────────────────────────────────────
-  const goiYoY = query(`SELECT CAST(strftime('%Y', date) AS INTEGER) as year, CAST(strftime('%m', date) AS INTEGER) as month, SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) - SUM(CASE WHEN gl_account_type = 'Expense' THEN ${expSign} ELSE 0 END) as oi FROM gl_company_cash GROUP BY year, month ORDER BY year, month`);
-  const goiByYear = {};
-  for (const r of goiYoY) { if (!goiByYear[r.year]) goiByYear[r.year] = {}; goiByYear[r.year][r.month] = Math.round(r.oi); }
+  // Income YoY — gross and net per month per year (from gl_company_cash, same
+  // source as the YTD tiles). Powers the two side-by-side year-over-year line
+  // charts on the dashboard.
+  const incYoY = query(`SELECT CAST(strftime('%Y', date) AS INTEGER) as year, CAST(strftime('%m', date) AS INTEGER) as month, SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as gross, SUM(CASE WHEN gl_account_type = 'Expense' THEN ${expSign} ELSE 0 END) as expense FROM gl_company_cash GROUP BY year, month ORDER BY year, month`);
+  const grossByYear = {}, netByYear = {}, goiByYear = {};
+  for (const r of incYoY) {
+    if (!grossByYear[r.year]) { grossByYear[r.year] = {}; netByYear[r.year] = {}; goiByYear[r.year] = {}; }
+    grossByYear[r.year][r.month] = Math.round(r.gross);
+    netByYear[r.year][r.month]   = Math.round(r.gross - r.expense);
+    goiByYear[r.year][r.month]   = Math.round(r.gross - r.expense); // alias kept for any old refs
+  }
 
   // RPU YoY uses the same gl_company_cash source as the RPU tile so the line
   // chart and the tile agree (both = company gross income per unit).
@@ -334,7 +342,7 @@ export async function buildDashboard() {
     healthCounts, agingBuckets, prospectsBySource, marketingFunnel,
     delinquentTrend, incomeMonthly: incomeByMonth, occupancyTrend,
     rentIncreaseDistribution: [], rentCollectionDetail: [], doorsAddedDetail: [],
-    goiByYear, rpuByYear,
+    goiByYear, rpuByYear, grossByYear, netByYear,
   };
 
   // ── DRILLDOWNS (simplified — full list for each tile) ──────────────────
