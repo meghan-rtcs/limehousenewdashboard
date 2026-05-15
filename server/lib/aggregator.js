@@ -227,7 +227,11 @@ export async function buildDashboard() {
   const SOURCE_COLORS = { Zillow: "#3d8c1f", "Apartments.com": "#2471a3", Trulia: "#7d3c98", Direct: "#d68910", Other: "#aab5a3" };
   const prospectsBySource = Object.entries(sourceCounts).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value, color: SOURCE_COLORS[label] || "#aab5a3" }));
 
-  const reAvailable = reUnits.filter(u => !u.is_occupied && /avail|list|market/i.test(u.status || ""));
+  // "Units on market" = anything in RentEngine that isn't actively leased.
+  // We deliberately do NOT gate on `is_occupied` — that flag often lags reality
+  // in RentEngine (units stay flagged occupied after move-out until the listing
+  // is republished). Counting by status matches what staff see in RentEngine.
+  const reAvailable = reUnits.filter(u => !/leased/i.test(u.status || ""));
   const unitsOnMarket = reAvailable.length;
   const dom = reAvailable.map(u => u.created_at ? Math.max(0, Math.floor((now - new Date(u.created_at)) / 86400000)) : null).filter(v => v !== null);
   const avgDaysOnMarket = dom.length ? Math.round(dom.reduce((a, b) => a + b, 0) / dom.length) : 0;
