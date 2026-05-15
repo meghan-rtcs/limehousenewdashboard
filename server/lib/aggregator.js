@@ -223,7 +223,23 @@ export async function buildDashboard() {
   // ── MARKETING (RentEngine) ─────────────────────────────────────────────
   const newProspects = reProspects.length;
   const sourceCounts = {};
-  for (const p of reProspects) { const s = p.source || "Other"; sourceCounts[s] = (sourceCounts[s] || 0) + 1; }
+  // Normalize source names: RentEngine stores casing inconsistently
+  // (e.g. "Rent.com" vs "rent.com" vs "rent" — all the same source).
+  const SOURCE_CANONICAL = {
+    "rent.com": "Rent.com", "rent": "Rent.com",
+    "zillow": "Zillow", "apartments.com": "Apartments.com",
+    "trulia": "Trulia", "realtor.com": "Realtor.com",
+    "homes.com": "Homes.com", "hotpads": "HotPads",
+    "zumper": "Zumper", "rentengine": "RentEngine",
+    "website widget": "Website Widget", "text message": "Text Message",
+    "text ai": "Text AI", "phone call": "Phone Call",
+    "for rent sign": "For Rent Sign", "other": "Other",
+  };
+  const canonSource = (s) => {
+    if (!s) return "Other";
+    return SOURCE_CANONICAL[s.trim().toLowerCase()] || s;
+  };
+  for (const p of reProspects) { const s = canonSource(p.source); sourceCounts[s] = (sourceCounts[s] || 0) + 1; }
   const SOURCE_COLORS = { Zillow: "#3d8c1f", "Apartments.com": "#2471a3", Trulia: "#7d3c98", Direct: "#d68910", Other: "#aab5a3" };
   const prospectsBySource = Object.entries(sourceCounts).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value, color: SOURCE_COLORS[label] || "#aab5a3" }));
 
@@ -386,8 +402,8 @@ export async function buildDashboard() {
     showingsCompleted: notWired("Showings", "No showing source."),
     totalCalls: notWired("Calls", "No phone source."),
     totalTexts: notWired("Texts", "No SMS source."),
-    unitsOnMarket: { title: "On market", cols: ["ID", "Status", "Days"], rows: reAvailable.slice(0, 200).map(u => { const d = u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0; return [String(u.id), u.status || "—", String(d)]; }), summary: `${unitsOnMarket} listed` },
-    avgDaysOnMarket: { title: "Days on market", cols: ["ID", "Days"], rows: reAvailable.slice(0, 200).map(u => [String(u.id), String(u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0)]), summary: `Avg ${avgDaysOnMarket} · Median ${medianDaysOnMarket}` },
+    unitsOnMarket: { title: "On market", cols: ["ID", "Status", "Days"], rows: reAvailable.slice(0, 200).map(u => { const d = u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0; return [String(u.id), u.status || "—", String(d)]; }), summary: `${unitsOnMarket} listed`, note: "All RentEngine units whose status is not 'Leased' (Available + On Hold). The 'is_occupied' flag is intentionally ignored because it lags reality — it stays true after move-out until a listing is republished." },
+    avgDaysOnMarket: { title: "Days on market", cols: ["ID", "Status", "Days"], rows: reAvailable.slice(0, 200).map(u => [String(u.id), u.status || "—", String(u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0)]), summary: `Avg ${avgDaysOnMarket} · Median ${medianDaysOnMarket}`, note: "Days = today minus the unit's RentEngine 'created_at' date. RentEngine doesn't expose a 'first listed' date, so units that have been re-listed after a previous tenancy will show their full age in RentEngine, not just the current marketing window." },
     medianDaysOnMarket: { title: "Median DOM", cols: ["ID", "Days"], rows: [], summary: `Median ${medianDaysOnMarket} days` },
   };
 
