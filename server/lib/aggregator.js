@@ -37,6 +37,17 @@ export async function buildDashboard() {
     safe(buildium.listApplicants(), []),
   ]);
 
+  // Per-unit leasing performance (true days_on_market, showings, calls,
+  // texts, applications, property_health) — one call per unit, run in
+  // parallel. Each call is wrapped in safe() so a single 404/500 won't
+  // poison the whole sync.
+  const perfPeriodEnd = now.toISOString();
+  const perfList = await Promise.all(
+    reUnits.map(u => safe(rentengine.unitLeasingPerformance(u.id, yearAgoFrom, perfPeriodEnd), null))
+  );
+  const perfByUnit = new Map();
+  perfList.forEach((p, i) => { if (p) perfByUnit.set(reUnits[i].id, p); });
+
   // Buildium applications submitted in the trailing 12 months
   // Each applicant record has Applications[] with ApplicationSubmittedDateTime.
   const yearAgoMs = new Date(yearAgoIso).getTime();
@@ -66,6 +77,7 @@ export async function buildDashboard() {
       "renewalRate","renewalsCount","fixedLeases","mtmLeases",
       "appsSubmitted","moveins","appsPerMovein","evictionsPending",
       "avgDaysOnMarket","medianDaysOnMarket","unitsOnMarket","newProspects",
+      "showingsCompleted","totalCalls","totalTexts","completionRate",
     ],
   };
 
@@ -249,18 +261,38 @@ export async function buildDashboard() {
   // is republished). Counting by status matches what staff see in RentEngine.
   const reAvailable = reUnits.filter(u => !/leased/i.test(u.status || ""));
   const unitsOnMarket = reAvailable.length;
-  const dom = reAvailable.map(u => u.created_at ? Math.max(0, Math.floor((now - new Date(u.created_at)) / 86400000)) : null).filter(v => v !== null);
+  // True days-on-market from RentEngine per-unit reporting (only on-market units).
+  const dom = reAvailable
+    .map(u => perfByUnit.get(u.id)?.days_on_market)
+    .filter(v => v != null && Number.isFinite(v));
   const avgDaysOnMarket = dom.length ? Math.round(dom.reduce((a, b) => a + b, 0) / dom.length) : 0;
   const sortedDom = [...dom].sort((a, b) => a - b);
   const medianDaysOnMarket = sortedDom.length ? sortedDom[Math.floor(sortedDom.length / 2)] : 0;
+
+  // Roll-ups across ALL RE units in the trailing 12 months (showings, calls,
+  // texts, applications) from the same per-unit reporting endpoint.
+  let showingsScheduled = 0, showingsCompleted = 0, totalCalls = 0, totalTexts = 0, appsRequestedRE = 0, appsSubmittedRE = 0;
+  for (const p of perfByUnit.values()) {
+    showingsScheduled += p.showings_scheduled || 0;
+    showingsCompleted += p.showings_completed || 0;
+    totalCalls        += p.total_calls || 0;
+    totalTexts        += p.outbound_texts || 0;
+    appsRequestedRE   += p.applications_requested || 0;
+    appsSubmittedRE   += p.applications_submitted || 0;
+  }
+  const completionRate = showingsScheduled > 0
+    ? Math.round((showingsCompleted / showingsScheduled) * 1000) / 10
+    : 0;
 
   const marketing = {
     unitsOnMarket: buildKpi(unitsOnMarket, 0, { invertDelta: true }),
     avgDaysOnMarket: buildKpi(avgDaysOnMarket, 0, { invertDelta: true }),
     medianDaysOnMarket: buildKpi(medianDaysOnMarket, 0, { invertDelta: true }),
     newProspects: buildKpi(newProspects, 0),
-    showingsCompleted: buildKpi(0, 0), totalCalls: buildKpi(0, 0),
-    totalTexts: buildKpi(0, 0), completionRate: buildKpi(0, 0, { unit: "%" }),
+    showingsCompleted: buildKpi(showingsCompleted, 0),
+    totalCalls: buildKpi(totalCalls, 0),
+    totalTexts: buildKpi(totalTexts, 0),
+    completionRate: buildKpi(completionRate, 0, { unit: "%" }),
   };
 
   // ── SPARKLINES ─────────────────────────────────────────────────────────
@@ -325,10 +357,21 @@ export async function buildDashboard() {
     if (ag) { agingBuckets[0].amount = Math.round(ag.b0 || 0); agingBuckets[1].amount = Math.round(ag.b1 || 0); agingBuckets[2].amount = Math.round(ag.b2 || 0); agingBuckets[3].amount = Math.round(ag.b3 || 0); }
   }
 
-  const healthCounts = { Healthy: occupiedUnits, "At-risk": delinquentCount, Waitlist: 0, "On Hold": 0, "Off-Market": vacantUnits };
+  // Property health from RentEngine per-unit reporting (on-market units only).
+  // Off-market = vacant units that aren't currently listed in RentEngine.
+  const healthCounts = { Healthy: 0, "At-risk": 0, Waitlist: 0, "On Hold": 0, "Off-Market": 0, Commercial: 0 };
+  for (const u of reAvailable) {
+    const h = perfByUnit.get(u.id)?.property_health || "Unknown";
+    if (healthCounts[h] != null) healthCounts[h] += 1;
+    else healthCounts[h] = 1;
+  }
+  // Treat any vacant unit not in RE as Off-Market.
+  healthCounts["Off-Market"] = Math.max(vacantUnits - unitsOnMarket, 0);
   const marketingFunnel = [
-    { label: "Prospects", value: newProspects }, { label: "Showings scheduled", value: 0 },
-    { label: "Showings completed", value: 0 }, { label: "Applications", value: appsSubmitted },
+    { label: "Prospects", value: newProspects },
+    { label: "Showings scheduled", value: showingsScheduled },
+    { label: "Showings completed", value: showingsCompleted },
+    { label: "Applications", value: appsSubmitted },
     { label: "Move-ins", value: moveins },
   ];
 
@@ -398,12 +441,12 @@ export async function buildDashboard() {
     appsSubmitted: { title: "Applications submitted (last 12 mo)", cols: ["Applicant", "Status", "App #", "Submitted"], rows: submittedApps.slice().sort((x, y) => (y.app.ApplicationSubmittedDateTime || "").localeCompare(x.app.ApplicationSubmittedDateTime || "")).slice(0, 500).map(({ applicant, app }) => [`${applicant.FirstName || ""} ${applicant.LastName || ""}`.trim() || "—", app.ApplicationStatus || applicant.Status || "—", app.ApplicationNumber || String(app.Id || ""), (app.ApplicationSubmittedDateTime || "").slice(0, 10)]), summary: `${appsSubmitted} applications submitted` },
     moveins: { title: "Move-ins (last 12 mo)", cols: ["Lease", "Start"], rows: moveinsRows.slice(-200).reverse().map(r => [String(r.id), r.from_date || "—"]), summary: `${moveins} move-ins` },
     appsPerMovein: { title: "Funnel", cols: ["Stage", "Count"], rows: [["Apps", String(appsSubmitted)], ["Move-ins", String(moveins)], ["Ratio", moveins ? (appsSubmitted / moveins).toFixed(1) : "—"]], summary: moveins ? `${(appsSubmitted / moveins).toFixed(1)} apps per move-in` : "—" },
-    completionRate: notWired("Completion rate", "No showing source."),
-    showingsCompleted: notWired("Showings", "No showing source."),
-    totalCalls: notWired("Calls", "No phone source."),
-    totalTexts: notWired("Texts", "No SMS source."),
-    unitsOnMarket: { title: "On market", cols: ["ID", "Status", "Days"], rows: reAvailable.slice(0, 200).map(u => { const d = u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0; return [String(u.id), u.status || "—", String(d)]; }), summary: `${unitsOnMarket} listed`, note: "All RentEngine units whose status is not 'Leased' (Available + On Hold). The 'is_occupied' flag is intentionally ignored because it lags reality — it stays true after move-out until a listing is republished." },
-    avgDaysOnMarket: { title: "Days on market", cols: ["ID", "Status", "Days"], rows: reAvailable.slice(0, 200).map(u => [String(u.id), u.status || "—", String(u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0)]), summary: `Avg ${avgDaysOnMarket} · Median ${medianDaysOnMarket}`, note: "Days = today minus the unit's RentEngine 'created_at' date. RentEngine doesn't expose a 'first listed' date, so units that have been re-listed after a previous tenancy will show their full age in RentEngine, not just the current marketing window." },
+    completionRate: { title: "Showing completion rate", cols: ["Unit", "Status", "Scheduled", "Completed", "Rate"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.showings_scheduled) return null; const r = Math.round((p.showings_completed / p.showings_scheduled) * 1000) / 10; return [String(u.id), u.status || "—", String(p.showings_scheduled), String(p.showings_completed), `${r}%`]; }).filter(Boolean), summary: `${showingsCompleted}/${showingsScheduled} = ${completionRate}%`, note: "Sum of showings_completed ÷ sum of showings_scheduled across all RentEngine units in the trailing 12 months." },
+    showingsCompleted: { title: "Showings completed (last 12 mo)", cols: ["Unit", "Status", "Scheduled", "Completed"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || (!p.showings_scheduled && !p.showings_completed)) return null; return [String(u.id), u.status || "—", String(p.showings_scheduled || 0), String(p.showings_completed || 0)]; }).filter(Boolean), summary: `${showingsCompleted} completed · ${showingsScheduled} scheduled`, note: "From RentEngine /reporting/leasing-performance/units, summed across all units in the trailing 12 months." },
+    totalCalls: { title: "Calls (last 12 mo)", cols: ["Unit", "Status", "Calls"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.total_calls) return null; return [String(u.id), u.status || "—", String(p.total_calls)]; }).filter(Boolean).sort((a, b) => Number(b[2]) - Number(a[2])), summary: `${totalCalls} calls`, note: "From RentEngine /reporting/leasing-performance/units total_calls field, summed across all units in the trailing 12 months." },
+    totalTexts: { title: "Outbound texts (last 12 mo)", cols: ["Unit", "Status", "Texts"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.outbound_texts) return null; return [String(u.id), u.status || "—", String(p.outbound_texts)]; }).filter(Boolean).sort((a, b) => Number(b[2]) - Number(a[2])), summary: `${totalTexts} texts`, note: "From RentEngine /reporting/leasing-performance/units outbound_texts field, summed across all units in the trailing 12 months." },
+    unitsOnMarket: { title: "On market", cols: ["ID", "Status", "Health", "Days"], rows: reAvailable.slice(0, 200).map(u => { const p = perfByUnit.get(u.id); const d = p?.days_on_market != null ? p.days_on_market : (u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0); return [String(u.id), u.status || "—", p?.property_health || "—", String(d)]; }), summary: `${unitsOnMarket} listed`, note: "All RentEngine units whose status is not 'Leased' (Available + On Hold). The 'is_occupied' flag is intentionally ignored because it lags reality. Days and Health come from RentEngine's per-unit leasing-performance report." },
+    avgDaysOnMarket: { title: "Days on market", cols: ["ID", "Status", "Health", "Days"], rows: reAvailable.slice(0, 200).map(u => { const p = perfByUnit.get(u.id); const d = p?.days_on_market != null ? p.days_on_market : (u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0); return [String(u.id), u.status || "—", p?.property_health || "—", String(d)]; }), summary: `Avg ${avgDaysOnMarket} · Median ${medianDaysOnMarket}`, note: "True days_on_market from RentEngine's per-unit leasing-performance report (resets when a unit is re-listed)." },
     medianDaysOnMarket: { title: "Median DOM", cols: ["ID", "Days"], rows: [], summary: `Median ${medianDaysOnMarket} days` },
   };
 

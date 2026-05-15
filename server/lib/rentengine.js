@@ -52,5 +52,9 @@ export const rentengine = {
     }),
   listMarketingListings: (accountId) =>
     accountId ? request(`/marketing/listings/${accountId}`) : null,
+  // Per-unit leasing performance: true days_on_market plus showings, calls,
+  // texts, applications, prospects, and property_health for the period.
+  unitLeasingPerformance: (unitId, start, end) =>
+    request(`/reporting/leasing-performance/units/${unitId}`, { start, end }),
   raw: request,
 };
