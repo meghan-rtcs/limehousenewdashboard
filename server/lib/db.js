@@ -173,6 +173,19 @@ function migrate(db) {
       synced_at TEXT
     );
 
+    -- Daily property roster snapshots (one row per active property per UTC day).
+    -- Used to compute doors gained/lost by diffing today's roster against the
+    -- oldest snapshot in the trailing 12 months. PK on (snapshot_date,
+    -- property_id) so re-running the snapshot in the same day is a no-op.
+    CREATE TABLE IF NOT EXISTS property_snapshots (
+      snapshot_date TEXT NOT NULL,
+      property_id INTEGER NOT NULL,
+      name TEXT,
+      unit_count INTEGER,
+      PRIMARY KEY (snapshot_date, property_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_property_snapshots_date ON property_snapshots(snapshot_date);
+
     -- Sync log
     CREATE TABLE IF NOT EXISTS sync_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

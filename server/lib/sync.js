@@ -269,6 +269,39 @@ async function syncProperties() {
   return props;
 }
 
+// ── Property roster snapshot (for doors gained/lost diffing) ─────────────────
+// Captures the active property list + per-property unit count once per UTC day.
+// Idempotent: re-running on the same day overwrites that day's rows.
+function recordPropertySnapshot() {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = query(`
+    SELECT p.id, p.name, COUNT(u.id) as unit_count
+    FROM properties p
+    LEFT JOIN units u ON u.property_id = p.id
+    WHERE p.is_active = 1
+    GROUP BY p.id
+  `);
+  if (!rows.length) {
+    console.log("[sync] Property snapshot: no active properties, skipping");
+    return 0;
+  }
+  // Wipe + replace today's snapshot atomically. Without the DELETE, a property
+  // that disappeared from the active roster between two same-day runs would
+  // still appear in today's snapshot (only INSERT OR REPLACE on the same key
+  // does not remove vanished rows).
+  const db = getDb();
+  const tx = db.transaction((dayRows) => {
+    db.prepare("DELETE FROM property_snapshots WHERE snapshot_date = ?").run(today);
+    const ins = db.prepare(
+      "INSERT INTO property_snapshots (snapshot_date, property_id, name, unit_count) VALUES (?, ?, ?, ?)"
+    );
+    for (const r of dayRows) ins.run(today, r.id, r.name, r.unit_count);
+  });
+  tx(rows);
+  console.log(`[sync] Property snapshot ${today}: ${rows.length} properties`);
+  return rows.length;
+}
+
 // ── Units ────────────────────────────────────────────────────────────────────
 async function syncUnits() {
   const units = await buildium.listUnits();
@@ -479,6 +512,10 @@ export async function syncAll(type = "full") {
     // 3. Outstanding balances + daily snapshot
     const balances = await safe(syncOutstandingBalances(), []);
     recordDailySnapshot(balances);
+
+    // 3b. Property roster snapshot (idempotent per UTC day) — feeds doors gained/lost
+    try { recordPropertySnapshot(); }
+    catch (e) { errors.push(`property snapshot: ${e.message}`); }
 
     // 4. GL entries — incremental: only pull from the last sync forward
     const lastGLDate = queryOne("SELECT MAX(date) as d FROM gl_entries")?.d;

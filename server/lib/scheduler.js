@@ -31,6 +31,12 @@ export function startScheduler() {
     runSync("incremental");
   });
 
+  // Midnight UTC — daily property roster snapshot for doors gained/lost tracking
+  cron.schedule("5 0 * * *", () => {
+    console.log("[scheduler] Midnight property snapshot sync triggered");
+    runSync("incremental");
+  });
+
   // Extra snapshots on rent collection windows:
   // Day 1-5 and Day 8-12 of each month at noon UTC
   // (captures "by 3rd" and "by 10th" windows)

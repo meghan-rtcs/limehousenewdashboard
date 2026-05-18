@@ -39,9 +39,21 @@ A static React dashboard (Babel-in-browser) for Limehouse Property Management, s
 | Evictions pending | Buildium active leases (`IsEvictionPending`) | |
 | Vacant rented | Buildium `/leases?statuses=Future` | Units not in active-lease set with a Future lease whose `LeaseFromDate > today` |
 | Avg days vacant | Buildium past leases (`MoveOutData[].MoveOutDate` / `LeaseToDate`) | For each currently-vacant unit, days since the most recent past-lease end |
-| Doors lost / Owners gained | Buildium `/rentals/owners` (`ManagementAgreementStartDate` / `EndDate`) | Owners with start/end in the last 12 months; doors lost = sum of units belonging to properties of owners whose end date is in window |
+| Doors gained / lost / net | Local `property_snapshots` table | Daily snapshot of the active property roster (one row per active property per UTC day, captured automatically on every sync). Gained = properties on today's roster but missing from the oldest snapshot in the trailing 12 months; Lost = vice versa. Door counts come from `unit_count` at each snapshot date. No manual data entry required (replaces the prior dependency on `ManagementAgreement*` dates, which staff rarely populated). Requires 1 full year of snapshots to reach a true trailing-12mo baseline. |
+| Avg length of tenancy | Buildium all leases + `MoveOutData` / `Tenants[].MoveInDate` | Per-tenant: chains all leases for a `(tenantId, unitId)` pair, takes earliest MoveInDate → latest MoveOutDate. Window: tenants whose latest MoveOutDate is in the trailing 12 months. Chaining is essential because Buildium creates a new lease record with a new LeaseFromDate at every renewal. |
+| Avg SD withheld ($, %) | Buildium `/leases/{id}/transactions` per past lease | Sums `|TotalAmount|` of `ApplyDeposit` transactions whose memo contains "deposit applied" (excludes "Prepayment applied to balances" — same TransactionTypeEnum but different concept). Capped at original SecurityDeposit as a safety belt. Window: move-outs from 13 months ago through 30 days ago (gives time for reconciliation, which Limehouse posts ~30 days after move-out). Per-lease API calls throttled to concurrency 5 via `pMap`. |
 
 Metrics that still return `0` because no derivable source exists in the live API responses: showings, calls, texts, rent-increase distribution. Some date-driven metrics may also legitimately read `0` (e.g. owners gained = 0 when all populated `ManagementAgreementStartDate` values are older than 12 months) — those are real, not placeholder.
+
+## Scheduled Jobs (`server/lib/scheduler.js`)
+
+`node-cron` runs `syncAll("incremental")` on multiple schedules:
+- 6 AM ET (`0 10 * * *` UTC) — morning sync
+- 9 PM ET (`0 1 * * *` UTC) — evening sync
+- **00:05 UTC daily** (`5 0 * * *`) — midnight sync. Primary purpose is to capture a fresh `property_snapshots` row each day for doors gained/lost diffing.
+- Day 1–5 and 8–12 of each month at noon UTC — extra snapshots for the "Rent by 3rd/10th" tiles.
+
+Each sync also calls `recordPropertySnapshot()`, which atomically deletes + re-inserts the current active property roster for today's UTC date (idempotent — multiple same-day runs converge on the latest state).
 
 ## Caching & Refresh
 

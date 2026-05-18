@@ -250,24 +250,40 @@ export async function buildDashboard() {
   const avgDaysVacant = vacantDays.length ? Math.round(vacantDays.reduce((a, b) => a + b, 0) / vacantDays.length) : 0;
 
   // ── DOORS ──────────────────────────────────────────────────────────────
-  const ownersLostRows = query(`SELECT id, name, agreement_end, property_ids FROM owners WHERE agreement_end IS NOT NULL AND agreement_end >= ? AND agreement_end <= ?`, [yearAgoIso, todayIso]);
-  let doorsLost = 0;
-  const ownersLostWithDoors = ownersLostRows.map(o => {
-    const pids = JSON.parse(o.property_ids || "[]");
-    const doors = pids.length ? (queryOne(`SELECT COUNT(*) as c FROM units WHERE property_id IN (${pids.join(",")})`)?.c || 0) : 0;
-    doorsLost += doors;
-    return { ...o, doors };
-  });
-  const ownersGainedRows = query(`SELECT id, name, agreement_start, property_ids FROM owners WHERE agreement_start IS NOT NULL AND agreement_start >= ? AND agreement_start <= ?`, [yearAgoIso, todayIso]);
-  let doorsAdded = 0;
-  const ownersGainedWithDoors = ownersGainedRows.map(o => {
-    const pids = JSON.parse(o.property_ids || "[]");
-    const doors = pids.length ? (queryOne(`SELECT COUNT(*) as c FROM units WHERE property_id IN (${pids.join(",")})`)?.c || 0) : 0;
-    doorsAdded += doors;
-    return { ...o, doors };
-  });
+  // Source of truth: daily property_snapshots table. Compare today's roster
+  // (latest snapshot) against the oldest snapshot in the trailing 12 months.
+  // Properties present today but missing from the baseline → gained. The
+  // reverse → lost. This replaces the old owner-agreement-date method, which
+  // depended on PM staff filling in agreement start/end dates in Buildium.
+  const latestSnapDate = queryOne("SELECT MAX(snapshot_date) as d FROM property_snapshots")?.d;
+  const baselineSnapDate = queryOne(
+    "SELECT MIN(snapshot_date) as d FROM property_snapshots WHERE snapshot_date >= ?",
+    [yearAgoIso]
+  )?.d;
+  const todaySnap = latestSnapDate
+    ? query("SELECT property_id, name, unit_count FROM property_snapshots WHERE snapshot_date = ?", [latestSnapDate])
+    : [];
+  const baselineSnap = baselineSnapDate
+    ? query("SELECT property_id, name, unit_count FROM property_snapshots WHERE snapshot_date = ?", [baselineSnapDate])
+    : [];
+  const todayMap = new Map(todaySnap.map(r => [r.property_id, r]));
+  const baselineMap = new Map(baselineSnap.map(r => [r.property_id, r]));
+
+  // Need at least two distinct snapshot dates to derive a diff.
+  const haveDiff = latestSnapDate && baselineSnapDate && latestSnapDate !== baselineSnapDate;
+  const propsGained = haveDiff
+    ? todaySnap.filter(r => !baselineMap.has(r.property_id))
+    : [];
+  const propsLost = haveDiff
+    ? baselineSnap.filter(r => !todayMap.has(r.property_id))
+    : [];
+  const doorsAdded = propsGained.reduce((s, r) => s + (r.unit_count || 0), 0);
+  const doorsLost = propsLost.reduce((s, r) => s + (r.unit_count || 0), 0);
   const ownersTotal = queryOne("SELECT COUNT(*) as c FROM owners WHERE is_active = 1")?.c || 0;
   const netDoors = doorsAdded - doorsLost;
+  const doorsCoverageDays = baselineSnapDate
+    ? Math.floor((new Date(latestSnapDate) - new Date(baselineSnapDate)) / 86400000)
+    : 0;
 
   const occupancy = {
     rate: buildKpi(pct(occupiedUnits, totalUnits), 0, { unit: "%" }),
@@ -279,7 +295,7 @@ export async function buildDashboard() {
     doorsLost: buildKpi(doorsLost, 0, { invertDelta: true }),
     netDoors: buildKpi(netDoors, 0),
     ownersTotal: buildKpi(ownersTotal, 0),
-    ownersGained: buildKpi(ownersGainedRows.length, 0),
+    ownersGained: buildKpi(propsGained.length, 0),
   };
 
   // ── LEASING ────────────────────────────────────────────────────────────
@@ -578,10 +594,37 @@ export async function buildDashboard() {
     vacantNotRented: { title: "Vacant (no future lease)", cols: ["ID", "Property", "Unit"], rows: query(`SELECT u.id, u.property_id, u.unit_number FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND u.id NOT IN (SELECT unit_id FROM leases WHERE status = 'Active') AND u.id NOT IN (SELECT DISTINCT unit_id FROM leases WHERE status = 'Future' AND from_date > ?) LIMIT 500`, [todayIso]).map(u => [String(u.id), propName(u.property_id), u.unit_number || "—"]), summary: `${vacantNotRentedCount} vacant` },
     vacantRented: { title: "Vacant with future lease", cols: ["Unit", "Lease starts"], rows: futureLeaseUnitIds.length ? query(`SELECT u.unit_number, l.from_date FROM leases l JOIN units u ON l.unit_id = u.id WHERE l.status = 'Future' AND l.from_date > ? AND u.id NOT IN (SELECT unit_id FROM leases WHERE status = 'Active') LIMIT 200`, [todayIso]).map(r => [r.unit_number || "—", r.from_date || "—"]) : [], summary: `${vacantRentedCount} pre-leased` },
     avgDaysVacant: { title: "Vacant units", cols: ["Unit", "Days vacant"], rows: query(`SELECT u.id, u.unit_number, MAX(l.to_date) as last_end FROM units u JOIN properties p ON u.property_id = p.id LEFT JOIN leases l ON l.unit_id = u.id AND l.status = 'Past' WHERE p.is_active = 1 AND u.id NOT IN (SELECT unit_id FROM leases WHERE status = 'Active') GROUP BY u.id ORDER BY last_end DESC LIMIT 500`).map(r => [r.unit_number || String(r.id), r.last_end ? String(Math.max(0, Math.floor((now - new Date(r.last_end)) / 86400000))) : "Never rented"]), summary: `Avg ${avgDaysVacant} days · ${vacantUnits} vacant (${vacantDaysRows.length} with prior leases)` },
-    doorsAdded: { title: "Doors added (trailing 12 mo)", cols: ["Owner", "Start date", "Doors"], rows: ownersGainedWithDoors.map(o => [o.name, o.agreement_start || "—", String(o.doors)]), summary: `${doorsAdded} doors across ${ownersGainedWithDoors.length} owners`, note: "Counted from each owner's Management Agreement Start Date in Buildium. Important: this only counts when the Start Date is filled in — please make sure to record the start date in Buildium when an owner onboards, otherwise added doors won't show up here. (Currently only 23 of 366 owners have a start date recorded.)" },
-    doorsLost: { title: "Doors lost (trailing 12 mo)", cols: ["Owner", "End date", "Doors"], rows: ownersLostWithDoors.map(o => [o.name, o.agreement_end || "—", String(o.doors)]), summary: `${doorsLost} doors across ${ownersLostWithDoors.length} owners`, note: "Counted from each owner's Management Agreement End Date in Buildium. Important: this only counts when the End Date is filled in — please make sure to record the end date in Buildium when an owner offboards, otherwise lost doors won't show up here." },
-    netDoors: { title: "Net doors (trailing 12 mo)", cols: ["Type", "Count"], rows: [["Doors added", String(doorsAdded)], ["Doors lost", String(doorsLost)], ["Net", String(netDoors >= 0 ? "+" + netDoors : netDoors)]], summary: `Net ${netDoors >= 0 ? "+" + netDoors : netDoors}`, note: "Added uses Management Agreement Start Date; Lost uses Management Agreement End Date. Important: lost doors only count when the End Date is recorded in Buildium — please update the agreement end date when offboarding an owner so this stays accurate." },
-    ownersGained: { title: "Owners gained", cols: ["Owner", "Start"], rows: ownersGainedRows.map(o => [o.name, o.agreement_start || "—"]), summary: `${ownersGainedRows.length} owners` },
+    doorsAdded: {
+      title: "Doors added (trailing 12 mo)",
+      cols: ["Property", "Doors"],
+      rows: propsGained.map(p => [p.name || `#${p.property_id}`, String(p.unit_count || 0)]),
+      summary: haveDiff
+        ? `${doorsAdded} doors across ${propsGained.length} properties (vs roster on ${baselineSnapDate})`
+        : `Baseline pending — ${doorsCoverageDays} day(s) of snapshot coverage so far`,
+      note: `Properties on the active roster today (${latestSnapDate || "—"}) that were NOT on the roster ${doorsCoverageDays} day(s) ago (${baselineSnapDate || "—"}). A daily snapshot is taken automatically with every sync; the trailing-12-month baseline will be reached once snapshots have accumulated for a full year.`,
+    },
+    doorsLost: {
+      title: "Doors lost (trailing 12 mo)",
+      cols: ["Property", "Doors"],
+      rows: propsLost.map(p => [p.name || `#${p.property_id}`, String(p.unit_count || 0)]),
+      summary: haveDiff
+        ? `${doorsLost} doors across ${propsLost.length} properties (vs roster on ${baselineSnapDate})`
+        : `Baseline pending — ${doorsCoverageDays} day(s) of snapshot coverage so far`,
+      note: `Properties that were on the active roster ${doorsCoverageDays} day(s) ago (${baselineSnapDate || "—"}) but are NOT on the roster today (${latestSnapDate || "—"}). Unit count reflects the door count at the baseline date (i.e. what was lost).`,
+    },
+    netDoors: {
+      title: "Net doors (trailing 12 mo)",
+      cols: ["Type", "Count"],
+      rows: [["Doors added", String(doorsAdded)], ["Doors lost", String(doorsLost)], ["Net", String(netDoors >= 0 ? "+" + netDoors : netDoors)]],
+      summary: `Net ${netDoors >= 0 ? "+" + netDoors : netDoors}`,
+      note: `Diffs today's property roster (${latestSnapDate || "—"}) against the oldest snapshot in the trailing 12 months (${baselineSnapDate || "—"}, ${doorsCoverageDays} day(s) of coverage). Captured automatically via a daily snapshot — no manual data entry required.`,
+    },
+    ownersGained: {
+      title: "Properties gained (trailing 12 mo)",
+      cols: ["Property", "Doors"],
+      rows: propsGained.map(p => [p.name || `#${p.property_id}`, String(p.unit_count || 0)]),
+      summary: `${propsGained.length} properties`,
+    },
     ownersTotal: { title: "All owners", cols: ["Owner", "Active", "Start", "End"], rows: query("SELECT name, is_active, agreement_start, agreement_end FROM owners LIMIT 500").map(o => [o.name, o.is_active ? "yes" : "no", o.agreement_start || "—", o.agreement_end || "—"]), summary: `${ownersTotal} owners` },
     renewalRate: { title: "Renewals", cols: ["ID", "Status", "From", "To", "Rent"], rows: query("SELECT id, status, from_date, to_date, rent FROM renewal_history WHERE created_at >= ? ORDER BY created_at DESC LIMIT 200", [yearAgoIso]).map(r => [String(r.id), r.status, r.from_date || "—", r.to_date || "—", r.rent != null ? `$${Math.round(r.rent)}` : "—"]), summary: `${renewalsInWindow} renewals · ${renewalRate}%` },
     renewalsCount: { title: "Renewals", cols: ["ID", "From", "To"], rows: query("SELECT id, from_date, to_date FROM renewal_history WHERE created_at >= ? ORDER BY created_at DESC LIMIT 200", [yearAgoIso]).map(r => [String(r.id), r.from_date || "—", r.to_date || "—"]), summary: `${renewalsInWindow}` },
