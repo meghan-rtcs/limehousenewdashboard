@@ -98,26 +98,69 @@ export async function buildDashboard() {
     ],
   };
 
+  // Fetch ALL leases (active/past/future) once from Buildium. We need the
+  // Tenants[] + MoveOutData[] arrays (not stored locally) for both the SD
+  // calc below and the tenancy-length calc that chains renewals per tenant.
+  const allLeasesAPI = await safe(buildium.listAllLeases(), []);
+  const allPastFromAPI = allLeasesAPI.filter(l => l.LeaseStatus === "Past");
+
   // ── TENANCY LENGTH (trailing 12 months of move-outs) ──────────────────
-  // For each Past lease whose move-out (to_date) falls in the trailing 12
-  // months, compute months between from_date and to_date and average.
-  const pastInWindowRows = query(
-    `SELECT l.id, l.unit_id, l.property_id, l.from_date, l.to_date, u.unit_number
-     FROM leases l
-     JOIN units u ON l.unit_id = u.id
-     JOIN properties p ON u.property_id = p.id
-     WHERE l.status = 'Past' AND p.is_active = 1
-       AND l.from_date IS NOT NULL AND l.to_date IS NOT NULL
-       AND l.to_date >= ? AND l.to_date <= ?`,
-    [yearAgoIso, todayIso]
+  // Chain renewals: a tenant's true tenancy starts at their FIRST MoveInDate
+  // on the unit (across all leases they appear on for that unit) and ends at
+  // their MoveOutDate on the most recent lease. Lease start/end dates reset
+  // every renewal in Buildium, so they undercount tenancy.
+  const earliestMoveInByTenantUnit = new Map();
+  for (const l of allLeasesAPI) {
+    const unitId = l.UnitId;
+    if (!unitId) continue;
+    for (const t of (l.Tenants || [])) {
+      const key = `${t.Id}-${unitId}`;
+      const candidate = t.MoveInDate || l.LeaseFromDate;
+      if (!candidate) continue;
+      const existing = earliestMoveInByTenantUnit.get(key);
+      if (!existing || candidate < existing) earliestMoveInByTenantUnit.set(key, candidate);
+    }
+  }
+
+  // Active-property scope (matches every other metric in this file).
+  const activePropIds = new Set(
+    query("SELECT id FROM properties WHERE is_active = 1").map(r => r.id)
   );
-  const tenancyDays = pastInWindowRows
-    .map(r => {
-      const from = new Date(r.from_date), to = new Date(r.to_date);
-      const d = Math.floor((to - from) / 86400000);
-      return Number.isFinite(d) && d > 0 ? { ...r, days: d } : null;
-    })
-    .filter(Boolean);
+
+  // Aggregate move-outs by (tenantId, unitId) so a tenant counted on multiple
+  // lease records (or duplicate MoveOutData rows) collapses to ONE record at
+  // their LATEST move-out for that unit. Then compute earliest move-in across
+  // all leases for that (tenant, unit) pair.
+  const moveOutsByKey = new Map(); // key -> { latestMoveOut, lease }
+  for (const lease of allPastFromAPI) {
+    if (!activePropIds.has(lease.PropertyId)) continue;
+    for (const mo of (lease.MoveOutData || [])) {
+      if (!mo.TenantId || !mo.MoveOutDate) continue;
+      if (mo.MoveOutDate < yearAgoIso || mo.MoveOutDate > todayIso) continue;
+      const key = `${mo.TenantId}|${lease.UnitId}`;
+      const existing = moveOutsByKey.get(key);
+      if (!existing || mo.MoveOutDate > existing.latestMoveOut) {
+        moveOutsByKey.set(key, { latestMoveOut: mo.MoveOutDate, lease, tenantId: mo.TenantId });
+      }
+    }
+  }
+
+  const tenancyDays = [];
+  for (const [key, { latestMoveOut, lease, tenantId }] of moveOutsByKey) {
+    const earliest = earliestMoveInByTenantUnit.get(`${tenantId}-${lease.UnitId}`) || lease.LeaseFromDate;
+    if (!earliest) continue;
+    const days = Math.floor((new Date(latestMoveOut) - new Date(earliest)) / 86400000);
+    if (!Number.isFinite(days) || days <= 0) continue;
+    tenancyDays.push({
+      tenantId,
+      leaseId: lease.Id,
+      propertyId: lease.PropertyId,
+      unitNumber: lease.UnitNumber,
+      from: earliest,
+      to: latestMoveOut,
+      days,
+    });
+  }
   const avgTenancyDays = tenancyDays.length
     ? Math.round(tenancyDays.reduce((s, r) => s + r.days, 0) / tenancyDays.length)
     : 0;
@@ -132,15 +175,13 @@ export async function buildDashboard() {
   // includes move-outs that have had time to be reconciled on the ledger.
   // Withheld = sum of |TotalAmount| across Buildium "ApplyDeposit"
   // transactions on that lease (capped at the original SD).
-  // withheld_pct = withheld / SD per lease.
-  // We fetch past leases from Buildium up front (the DB doesn't store SD),
-  // and use pMap to throttle the per-lease transactions calls so we don't
+  // Uses pMap to throttle the per-lease transactions calls so we don't
   // trigger 429 rate-limit errors.
   // ms-math (not calendar math) to avoid Date overflow on month-end boundaries.
   const sdWindowEndIso = new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10);
   const sdWindowStartIso = new Date(now.getTime() - 395 * 86400000).toISOString().slice(0, 10);
-  const allPastFromAPI = await safe(buildium.listLeases(["Past"]), []);
   const sdEligible = allPastFromAPI.filter(l => {
+    if (!activePropIds.has(l.PropertyId)) return false;
     const sd = l.AccountDetails?.SecurityDeposit || 0;
     return sd > 0 && l.LeaseToDate && l.LeaseToDate >= sdWindowStartIso && l.LeaseToDate <= sdWindowEndIso;
   });
@@ -153,8 +194,14 @@ export async function buildDashboard() {
     const sd = lease.AccountDetails?.SecurityDeposit || 0;
     const txns = txnLists[i] || [];
     // Buildium uses TransactionTypeEnum=ApplyDeposit for BOTH security-deposit
-    // reconciliations ("Deposit applied to balances") AND monthly prepayment
-    // applications ("Prepayment applied to balances"). We only want the former.
+    // reconciliations AND monthly prepayment applications. Filter by memo.
+    // Surveyed memo variants across 20 reconciled leases:
+    //   "Deposit applied to balances"           (standard SD reconciliation)
+    //   "Security Deposit applied to balances"  (less common SD variant)
+    //   "Prepayment applied to balances"        (EXCLUDED — monthly prepay)
+    // Both SD variants contain "deposit applied" (case-insensitive); the
+    // prepayment variant does not. Cap-at-SD acts as a defense-in-depth
+    // safety net if a future memo variant slips through.
     let withheld = 0;
     let applyDepositCount = 0;
     for (const t of txns) {
@@ -560,20 +607,21 @@ export async function buildDashboard() {
     medianDaysOnMarket: { title: "Median DOM", cols: ["ID", "Days"], rows: [], summary: `Median ${medianDaysOnMarket} days` },
     avgTenancyMonths: {
       title: "Avg length of tenancy (last 12 mo move-outs)",
-      cols: ["Lease", "Property", "Unit", "From", "To", "Months"],
+      cols: ["Tenant ID", "Property", "Unit", "Moved in", "Moved out", "Months", "Years"],
       rows: tenancyDays
         .slice()
         .sort((a, b) => b.days - a.days)
         .map(r => [
-          String(r.id),
-          propName(r.property_id),
-          r.unit_number || "—",
-          r.from_date,
-          r.to_date,
+          String(r.tenantId),
+          propName(r.propertyId),
+          r.unitNumber || "—",
+          r.from,
+          r.to,
           (r.days / 30.4375).toFixed(1),
+          (r.days / 365.25).toFixed(1),
         ]),
-      summary: `Avg ${avgTenancyMonths} mo (${(avgTenancyMonths / 12).toFixed(1)} yrs) · ${tenancyDays.length} move-outs`,
-      note: "Average across all past leases whose move-out date falls in the trailing 12 months. Months = (LeaseToDate − LeaseFromDate) ÷ 30.4375.",
+      summary: `Avg ${avgTenancyMonths} mo (${(avgTenancyMonths / 12).toFixed(1)} yrs) · ${tenancyDays.length} tenants moved out`,
+      note: "Per-tenant tenancy = (move-out date) − (earliest move-in date on that unit across all of the tenant's leases). This chains renewals, since Buildium creates a new lease record with a new LeaseFromDate every time a tenant renews. Window: tenants whose MoveOutDate falls in the trailing 12 months.",
     },
     avgSdWithheld: {
       title: "Avg SD withheld (last 12 mo move-outs)",
