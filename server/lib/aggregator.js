@@ -22,6 +22,22 @@ function safe(promise, fallback) {
   return promise.catch((err) => { console.warn("[agg] non-fatal:", err.message); return fallback; });
 }
 
+// Run an async mapper over items with a concurrency cap. Used to avoid
+// Buildium / RentEngine 429s when we'd otherwise fire 50+ calls in parallel.
+async function pMap(items, concurrency, fn) {
+  const out = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 export async function buildDashboard() {
   const now = new Date();
   const todayIso = now.toISOString().slice(0, 10);
@@ -78,8 +94,99 @@ export async function buildDashboard() {
       "appsSubmitted","moveins","appsPerMovein","evictionsPending",
       "avgDaysOnMarket","medianDaysOnMarket","unitsOnMarket","newProspects",
       "showingsCompleted","totalCalls","totalTexts","completionRate",
+      "avgTenancyMonths","avgSdWithheld","avgSdWithheldPct",
     ],
   };
+
+  // ── TENANCY LENGTH (trailing 12 months of move-outs) ──────────────────
+  // For each Past lease whose move-out (to_date) falls in the trailing 12
+  // months, compute months between from_date and to_date and average.
+  const pastInWindowRows = query(
+    `SELECT l.id, l.unit_id, l.property_id, l.from_date, l.to_date, u.unit_number
+     FROM leases l
+     JOIN units u ON l.unit_id = u.id
+     JOIN properties p ON u.property_id = p.id
+     WHERE l.status = 'Past' AND p.is_active = 1
+       AND l.from_date IS NOT NULL AND l.to_date IS NOT NULL
+       AND l.to_date >= ? AND l.to_date <= ?`,
+    [yearAgoIso, todayIso]
+  );
+  const tenancyDays = pastInWindowRows
+    .map(r => {
+      const from = new Date(r.from_date), to = new Date(r.to_date);
+      const d = Math.floor((to - from) / 86400000);
+      return Number.isFinite(d) && d > 0 ? { ...r, days: d } : null;
+    })
+    .filter(Boolean);
+  const avgTenancyDays = tenancyDays.length
+    ? Math.round(tenancyDays.reduce((s, r) => s + r.days, 0) / tenancyDays.length)
+    : 0;
+  const avgTenancyMonths = avgTenancyDays
+    ? +(avgTenancyDays / 30.4375).toFixed(1)
+    : 0;
+
+  // ── SECURITY DEPOSIT WITHHELD ──────────────────────────────────────────
+  // For each Past lease whose move-out (LeaseToDate) falls between 13 months
+  // ago and 30 days ago — Limehouse posts the formal "Applied Deposit"
+  // reconciliation roughly 30 days after move-out, so this window only
+  // includes move-outs that have had time to be reconciled on the ledger.
+  // Withheld = sum of |TotalAmount| across Buildium "ApplyDeposit"
+  // transactions on that lease (capped at the original SD).
+  // withheld_pct = withheld / SD per lease.
+  // We fetch past leases from Buildium up front (the DB doesn't store SD),
+  // and use pMap to throttle the per-lease transactions calls so we don't
+  // trigger 429 rate-limit errors.
+  // ms-math (not calendar math) to avoid Date overflow on month-end boundaries.
+  const sdWindowEndIso = new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10);
+  const sdWindowStartIso = new Date(now.getTime() - 395 * 86400000).toISOString().slice(0, 10);
+  const allPastFromAPI = await safe(buildium.listLeases(["Past"]), []);
+  const sdEligible = allPastFromAPI.filter(l => {
+    const sd = l.AccountDetails?.SecurityDeposit || 0;
+    return sd > 0 && l.LeaseToDate && l.LeaseToDate >= sdWindowStartIso && l.LeaseToDate <= sdWindowEndIso;
+  });
+  const propByLeaseId = new Map(allPastFromAPI.map(l => [l.Id, { propertyId: l.PropertyId, unitNumber: l.UnitNumber }]));
+  const txnLists = await pMap(sdEligible, 5, l => safe(buildium.leaseTransactions(l.Id), []));
+
+  const sdRecords = [];
+  sdEligible.forEach((lease, i) => {
+    const leaseId = lease.Id;
+    const sd = lease.AccountDetails?.SecurityDeposit || 0;
+    const txns = txnLists[i] || [];
+    // Buildium uses TransactionTypeEnum=ApplyDeposit for BOTH security-deposit
+    // reconciliations ("Deposit applied to balances") AND monthly prepayment
+    // applications ("Prepayment applied to balances"). We only want the former.
+    let withheld = 0;
+    let applyDepositCount = 0;
+    for (const t of txns) {
+      if (t.TransactionTypeEnum !== "ApplyDeposit") continue;
+      const memo = (t.Journal?.Memo || "").toLowerCase();
+      if (!memo.includes("deposit applied")) continue; // skip "Prepayment applied"
+      withheld += Math.abs(t.TotalAmount || 0);
+      applyDepositCount += 1;
+    }
+    if (applyDepositCount === 0) return; // skip un-reconciled move-outs
+    // Cap at SD: by accounting definition you can't withhold more than the
+    // deposit. Anything beyond becomes a tenant debt / write-off, not a
+    // "withholding". This also defends against any other ApplyDeposit memo
+    // variants that might slip through the filter above.
+    const cappedWithheld = Math.min(withheld, sd);
+    const meta = propByLeaseId.get(leaseId) || {};
+    sdRecords.push({
+      leaseId,
+      propertyId: meta.propertyId,
+      unitNumber: meta.unitNumber,
+      moveOutDate: lease.LeaseToDate,
+      sd,
+      withheld: cappedWithheld,
+      pct: sd > 0 ? Math.min(100, +((cappedWithheld / sd) * 100).toFixed(1)) : 0,
+    });
+  });
+  const avgSdWithheld = sdRecords.length
+    ? Math.round(sdRecords.reduce((s, r) => s + r.withheld, 0) / sdRecords.length)
+    : 0;
+  const avgSdWithheldPct = sdRecords.length
+    ? +(sdRecords.reduce((s, r) => s + r.pct, 0) / sdRecords.length).toFixed(1)
+    : 0;
 
   // ── OCCUPANCY (using IsUnitOccupied) ───────────────────────────────────
   // Source of truth for occupancy = active leases (matches the "208 leases" header
@@ -152,6 +259,7 @@ export async function buildDashboard() {
     moveins: buildKpi(moveins, 0),
     appsPerMovein: buildKpi(moveins ? +(appsSubmitted / moveins).toFixed(1) : 0, 0),
     evictionsPending: buildKpi(evictionsPendingCount, 0, { invertDelta: true }),
+    avgTenancyMonths: buildKpi(avgTenancyMonths, 0, { unit: "mo" }),
   };
 
   // ── FINANCIALS ─────────────────────────────────────────────────────────
@@ -230,6 +338,8 @@ export async function buildDashboard() {
     netIncome: buildKpi(ytdNet, 0, { unit: "$", decimals: 2 }),
     delinquent: buildKpi(Math.round(delinquentTotal * 100) / 100, 0, { unit: "$", invertDelta: true }),
     delinquentCount: buildKpi(delinquentCount, 0, { invertDelta: true }),
+    avgSdWithheld: buildKpi(avgSdWithheld, 0, { unit: "$" }),
+    avgSdWithheldPct: buildKpi(avgSdWithheldPct, 0, { unit: "%" }),
   };
 
   // ── MARKETING (RentEngine) ─────────────────────────────────────────────
@@ -448,6 +558,59 @@ export async function buildDashboard() {
     unitsOnMarket: { title: "On market", cols: ["ID", "Status", "Health", "Days"], rows: reAvailable.slice(0, 200).map(u => { const p = perfByUnit.get(u.id); const d = p?.days_on_market != null ? p.days_on_market : (u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0); return [String(u.id), u.status || "—", p?.property_health || "—", String(d)]; }), summary: `${unitsOnMarket} listed`, note: "All RentEngine units whose status is not 'Leased' (Available + On Hold). The 'is_occupied' flag is intentionally ignored because it lags reality. Days and Health come from RentEngine's per-unit leasing-performance report." },
     avgDaysOnMarket: { title: "Days on market", cols: ["ID", "Status", "Health", "Days"], rows: reAvailable.slice(0, 200).map(u => { const p = perfByUnit.get(u.id); const d = p?.days_on_market != null ? p.days_on_market : (u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0); return [String(u.id), u.status || "—", p?.property_health || "—", String(d)]; }), summary: `Avg ${avgDaysOnMarket} · Median ${medianDaysOnMarket}`, note: "True days_on_market from RentEngine's per-unit leasing-performance report (resets when a unit is re-listed)." },
     medianDaysOnMarket: { title: "Median DOM", cols: ["ID", "Days"], rows: [], summary: `Median ${medianDaysOnMarket} days` },
+    avgTenancyMonths: {
+      title: "Avg length of tenancy (last 12 mo move-outs)",
+      cols: ["Lease", "Property", "Unit", "From", "To", "Months"],
+      rows: tenancyDays
+        .slice()
+        .sort((a, b) => b.days - a.days)
+        .map(r => [
+          String(r.id),
+          propName(r.property_id),
+          r.unit_number || "—",
+          r.from_date,
+          r.to_date,
+          (r.days / 30.4375).toFixed(1),
+        ]),
+      summary: `Avg ${avgTenancyMonths} mo (${(avgTenancyMonths / 12).toFixed(1)} yrs) · ${tenancyDays.length} move-outs`,
+      note: "Average across all past leases whose move-out date falls in the trailing 12 months. Months = (LeaseToDate − LeaseFromDate) ÷ 30.4375.",
+    },
+    avgSdWithheld: {
+      title: "Avg SD withheld (last 12 mo move-outs)",
+      cols: ["Lease", "Property", "Unit", "Move-out", "SD", "Withheld", "%"],
+      rows: sdRecords
+        .slice()
+        .sort((a, b) => b.pct - a.pct)
+        .map(r => [
+          String(r.leaseId),
+          propName(r.propertyId),
+          r.unitNumber || "—",
+          r.moveOutDate || "—",
+          `$${r.sd.toLocaleString()}`,
+          `$${r.withheld.toLocaleString()}`,
+          `${r.pct}%`,
+        ]),
+      summary: `Avg $${avgSdWithheld.toLocaleString()} (${avgSdWithheldPct}%) · ${sdRecords.length} reconciled move-outs`,
+      note: "Sum of |TotalAmount| of Buildium 'Applied Deposit' transactions per lease (only the SD reconciliation entries — memo 'Deposit applied to balances' — not monthly prepayment applications), capped at the original SD. Window is move-outs between 13 months ago and 30 days ago (Limehouse posts the reconciliation ~30 days after move-out). Leases with no Applied Deposit posting are excluded.",
+    },
+    avgSdWithheldPct: {
+      title: "Avg SD withheld % (last 12 mo move-outs)",
+      cols: ["Lease", "Property", "Unit", "Move-out", "SD", "Withheld", "%"],
+      rows: sdRecords
+        .slice()
+        .sort((a, b) => b.pct - a.pct)
+        .map(r => [
+          String(r.leaseId),
+          propName(r.propertyId),
+          r.unitNumber || "—",
+          r.moveOutDate || "—",
+          `$${r.sd.toLocaleString()}`,
+          `$${r.withheld.toLocaleString()}`,
+          `${r.pct}%`,
+        ]),
+      summary: `Avg ${avgSdWithheldPct}% withheld · ${sdRecords.length} reconciled move-outs`,
+      note: "Per-lease withheld ÷ original SD, averaged. Source: Buildium 'Applied Deposit' transactions on each past lease.",
+    },
   };
 
   return { dashboard, drilldowns };

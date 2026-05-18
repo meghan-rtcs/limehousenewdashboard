@@ -347,6 +347,10 @@ const VarA = (function() {
             <KPI {...k('Rent by 10th', 'BD', SD.financials.rentCollectedBy10th, '%', 'rentCollected10th', '#3d8c1f', false, null, 'rentCollectedBy10th')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Avg rent / lease', 'BD', SD.financials.avgRentPerDoor, '$', 'avgRent', '#3d8c1f', false, null, 'avgRentPerDoor')} mobile={mobile} showSource={showSource} />
           </div>
+          <div style={{ display: 'grid', gridTemplateColumns: dgrid(2), gap: mobile ? 8 : 10, marginBottom: mobile ? 8 : 10 }}>
+            <KPI {...k('Avg SD withheld', 'BD', SD.financials.avgSdWithheld, '$', null, null, false, null, 'avgSdWithheld')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Avg SD withheld %', 'BD', SD.financials.avgSdWithheldPct, '%', null, null, false, null, 'avgSdWithheldPct')} mobile={mobile} showSource={showSource} />
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '2fr 1fr', gap: mobile ? 8 : 10, marginBottom: mobile ? 8 : 10 }}>
             <ChartCard mobile={mobile}
               title="Rent collection — 12 months"
@@ -514,6 +518,9 @@ const VarA = (function() {
             <ChartCard mobile={mobile} title={`Renewals — ${rangeMeta.sliceTail} mo`} subtitle={`${SD.leasing.renewalsCount.value} total`} onClick={() => setDrillKey('renewalsCount')}>
               <MiniBars data={SD.renewalsByMonth} valueKey="count" height={mobile?40:46} color="#3d8c1f" />
             </ChartCard>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: dgrid(4), gap: mobile ? 8 : 10, marginTop: mobile ? 8 : 10 }}>
+            <KPI {...k('Avg tenancy', 'BD', SD.leasing.avgTenancyMonths, 'mo', null, null, false, null, 'avgTenancyMonths')} mobile={mobile} showSource={showSource} />
           </div>
 
           {/* MARKETING */}
