@@ -292,8 +292,6 @@ const VarA = (function() {
       <div style={{ padding: mobile ? '12px 12px 28px' : '18px 26px 32px', maxWidth: 1480, margin: '0 auto' }}>
         <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:12, margin:'4px 0 12px', flexWrap:'wrap' }}>
           <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595' }}>CEO View · Financial Performance</div>
-          <button onClick={() => { sessionStorage.removeItem('limehouse_ceo'); setUnlocked(false); setPw(''); }}
-            style={{ background:'transparent', border:'1px solid #e5e8e2', color:'#6b7566', fontSize:11, padding:'4px 10px', borderRadius:5, cursor:'pointer', fontFamily:'inherit' }}>Lock</button>
         </div>
         <YoYIncomeRows mobile={mobile} SD={SD} showSource={showSource} setDrillKey={setDrillKey} k={k} />
       </div>
