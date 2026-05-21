@@ -203,7 +203,72 @@ const VarA = (function() {
     );
   }
 
-  function CeoView({ mobile }) {
+  // Shared YoY-chart block — renders one "X by year" line chart + matching KPI tile.
+  // Used by the CEO view for Gross / Net / RPU income rows.
+  function YoYIncomeRows({ mobile, SD, showSource, setDrillKey, k }) {
+    const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const palette = ['#d6dbd1','#c2cbbb','#aebaa3','#9aa88c','#869676','#728560','#5e7449','#456020','#3d8c1f'];
+    const buildYoY = (byYear) => {
+      const currentColor = '#2471a3';
+      const yrs = Object.keys(byYear || {}).map(Number).sort((a, b) => a - b);
+      const curY = yrs[yrs.length - 1];
+      const data = monthLabels.map((label, i) => {
+        const row = { month: label };
+        for (const y of yrs) {
+          const v = byYear?.[y]?.[i + 1];
+          if (v != null) row[String(y)] = v;
+        }
+        return row;
+      });
+      const series = yrs.map((y, idx) => {
+        const isCurrent = y === curY;
+        const colorIdx = Math.round((idx / Math.max(yrs.length - 1, 1)) * (palette.length - 1));
+        return {
+          key: String(y),
+          color: isCurrent ? currentColor : palette[colorIdx],
+          width: isCurrent ? 2.2 : 1.2,
+          opacity: isCurrent ? 1 : 0.85,
+          dots: isCurrent,
+        };
+      });
+      return { data, series, yrs, curY };
+    };
+    const moneyAxis = (v) => '$' + (Math.abs(v) >= 1000 ? Math.round(v / 1000) + 'k' : v);
+    const renderRow = (title, byYear, kpiValueObj, kpiLabel, drillId) => {
+      const { data, series, yrs, curY } = buildYoY(byYear);
+      return (
+        <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '3fr 1fr', gap: mobile ? 8 : 10, marginBottom: mobile ? 8 : 10 }}>
+          <ChartCard mobile={mobile}
+            title={title}
+            subtitle={yrs.length ? `Same month, year over year · ${yrs[0]}–${curY}` : 'Same month, year over year'}
+            legend={
+              <div style={{ display:'flex', gap:8, fontSize: 10, color:'#6b7566', flexWrap:'wrap', justifyContent:'flex-end' }}>
+                {series.map(s => (
+                  <span key={s.key} style={{ display:'inline-flex',alignItems:'center',gap:4 }}>
+                    <span style={{ width:8,height:8,background:s.color,borderRadius:2,opacity:s.opacity }} />{s.key}
+                  </span>
+                ))}
+              </div>
+            }
+            onClick={() => setDrillKey(drillId)}>
+            <LineChart data={data} series={series} height={mobile ? 130 : 150} yFmt={moneyAxis} />
+          </ChartCard>
+          <div style={{ display: 'grid', gridTemplateRows: '1fr', minHeight: 0 }}>
+            <KPI {...k(kpiLabel, 'BD', kpiValueObj, '$', drillId, '#3d8c1f', false, null, drillId)} mobile={mobile} showSource={showSource} />
+          </div>
+        </div>
+      );
+    };
+    return (
+      <>
+        {renderRow('Gross income — by year',     SD.grossByYear, SD.financials.grossIncome, 'Gross income — YTD',  'grossIncome')}
+        {renderRow('Net income — by year',       SD.netByYear,   SD.financials.netIncome,   'Net income — YTD',    'netIncome')}
+        {renderRow('Revenue per unit — by year', SD.rpuByYear,   SD.financials.rpu,         'RPU — last month',    'rpu')}
+      </>
+    );
+  }
+
+  function CeoView({ mobile, SD, showSource, setDrillKey, k }) {
     const [pw, setPw] = useState('');
     const [unlocked, setUnlocked] = useState(() => sessionStorage.getItem('limehouse_ceo') === '1');
     const [err, setErr] = useState(false);
@@ -224,16 +289,13 @@ const VarA = (function() {
       );
     }
     return (
-      <div style={{ padding: mobile ? '24px 14px 60px' : '60px 26px 80px', maxWidth: 1480, margin: '0 auto' }}>
-        <div style={{ background:'#fff', border:'1px solid #e5e8e2', borderRadius:10, padding: mobile?'40px 24px':'80px 60px', textAlign:'center' }}>
-          <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.14em', textTransform:'uppercase', color:'#9aa595', marginBottom:10 }}>CEO View</div>
-          <div style={{ fontSize: mobile?22:28, fontWeight:300, color:'#1c2119', letterSpacing:'-0.5px', marginBottom:10 }}>Coming soon</div>
-          <div style={{ fontSize:13, color:'#6b7566', maxWidth:480, margin:'0 auto', lineHeight:1.55 }}>
-            Executive KPIs aligned to job-description metrics will appear here once the scorecard is finalized.
-          </div>
+      <div style={{ padding: mobile ? '12px 12px 28px' : '18px 26px 32px', maxWidth: 1480, margin: '0 auto' }}>
+        <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:12, margin:'4px 0 12px', flexWrap:'wrap' }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595' }}>CEO View · Financial Performance</div>
           <button onClick={() => { sessionStorage.removeItem('limehouse_ceo'); setUnlocked(false); setPw(''); }}
-            style={{ marginTop:24, background:'transparent', border:'1px solid #e5e8e2', color:'#6b7566', fontSize:11, padding:'5px 11px', borderRadius:5, cursor:'pointer', fontFamily:'inherit' }}>Lock</button>
+            style={{ background:'transparent', border:'1px solid #e5e8e2', color:'#6b7566', fontSize:11, padding:'4px 10px', borderRadius:5, cursor:'pointer', fontFamily:'inherit' }}>Lock</button>
         </div>
+        <YoYIncomeRows mobile={mobile} SD={SD} showSource={showSource} setDrillKey={setDrillKey} k={k} />
       </div>
     );
   }
@@ -292,7 +354,7 @@ const VarA = (function() {
           ))}
         </div>
 
-        {tab === 'ceo' ? <CeoView mobile={mobile} /> : <>
+        {tab === 'ceo' ? <CeoView mobile={mobile} SD={SD} showSource={showSource} setDrillKey={setDrillKey} k={k} /> : <>
 
         {/* Range banner — confirms what the user is looking at */}
         <div style={{
@@ -374,71 +436,6 @@ const VarA = (function() {
               />
             </ChartCard>
           </div>
-          {(() => {
-            // Shared YoY chart helper: same multi-year pattern used for Gross,
-            // Net, and RPU. Each row in the data array is one calendar month with
-            // a value for every year that has data for that month.
-            const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-            const palette = ['#d6dbd1','#c2cbbb','#aebaa3','#9aa88c','#869676','#728560','#5e7449','#456020','#3d8c1f'];
-            const buildYoY = (byYear, _currentColor) => {
-              const currentColor = '#2471a3';
-              const yrs = Object.keys(byYear || {}).map(Number).sort((a, b) => a - b);
-              const curY = yrs[yrs.length - 1];
-              const data = monthLabels.map((label, i) => {
-                const row = { month: label };
-                for (const y of yrs) {
-                  const v = byYear?.[y]?.[i + 1];
-                  if (v != null) row[String(y)] = v;
-                }
-                return row;
-              });
-              const series = yrs.map((y, idx) => {
-                const isCurrent = y === curY;
-                const colorIdx = Math.round((idx / Math.max(yrs.length - 1, 1)) * (palette.length - 1));
-                return {
-                  key: String(y),
-                  color: isCurrent ? currentColor : palette[colorIdx],
-                  width: isCurrent ? 2.2 : 1.2,
-                  opacity: isCurrent ? 1 : 0.85,
-                  dots: isCurrent,
-                };
-              });
-              return { data, series, yrs, curY };
-            };
-            const moneyAxis = (v) => '$' + (Math.abs(v) >= 1000 ? Math.round(v / 1000) + 'k' : v);
-            const renderYoYRow = (title, byYear, color, kpiValueObj, kpiLabel, drillId) => {
-              const { data, series, yrs, curY } = buildYoY(byYear, color);
-              return (
-                <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '3fr 1fr', gap: mobile ? 8 : 10, marginBottom: mobile ? 8 : 10 }}>
-                  <ChartCard mobile={mobile}
-                    title={title}
-                    subtitle={yrs.length ? `Same month, year over year · ${yrs[0]}–${curY}` : 'Same month, year over year'}
-                    legend={
-                      <div style={{ display:'flex', gap:8, fontSize: 10, color:'#6b7566', flexWrap:'wrap', justifyContent:'flex-end' }}>
-                        {series.map(s => (
-                          <span key={s.key} style={{ display:'inline-flex',alignItems:'center',gap:4 }}>
-                            <span style={{ width:8,height:8,background:s.color,borderRadius:2,opacity:s.opacity }} />{s.key}
-                          </span>
-                        ))}
-                      </div>
-                    }
-                    onClick={() => setDrillKey(drillId)}>
-                    <LineChart data={data} series={series} height={mobile ? 130 : 150} yFmt={moneyAxis} />
-                  </ChartCard>
-                  <div style={{ display: 'grid', gridTemplateRows: '1fr', minHeight: 0 }}>
-                    <KPI {...k(kpiLabel, 'BD', kpiValueObj, '$', drillId, '#3d8c1f', false, null, drillId)} mobile={mobile} showSource={showSource} />
-                  </div>
-                </div>
-              );
-            };
-            return (
-              <>
-                {renderYoYRow('Gross income — by year', SD.grossByYear, '#3d8c1f', SD.financials.grossIncome, 'Gross income — YTD', 'grossIncome')}
-                {renderYoYRow('Net income — by year',   SD.netByYear,   '#2471a3', SD.financials.netIncome,   'Net income — YTD',   'netIncome')}
-                {renderYoYRow('Revenue per unit — by year', SD.rpuByYear, '#3d8c1f', SD.financials.rpu, 'RPU — last month', 'rpu')}
-              </>
-            );
-          })()}
 
           {/* OCCUPANCY */}
           <SectionHeader title="Occupancy & Doors" />
