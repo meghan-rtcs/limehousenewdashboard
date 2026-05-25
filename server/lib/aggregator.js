@@ -615,23 +615,23 @@ export async function buildDashboard() {
       {
         abbrev: "PM", name: "Portfolio Manager", people: 3,
         kpis: [
-          { name: "Portfolio Occupancy Rate", source: "BD", target: 95, direction: "gte", format: "pct", value: occupancyRate },
-          { name: "Delinquency Rate",         source: "BD", target: 3,  direction: "lte", format: "pct", value: delinquencyRate },
+          { name: "Portfolio Occupancy Rate", source: "BD", target: 95, direction: "gte", format: "pct", value: occupancyRate,    drillKey: "kpiOccupancyRate" },
+          { name: "Delinquency Rate",         source: "BD", target: 3,  direction: "lte", format: "pct", value: delinquencyRate,  drillKey: "kpiDelinquencyRate" },
         ],
       },
       {
         abbrev: "APM", name: "Assistant Property Manager", people: 2,
         kpis: [
-          { name: "Showing Completion Rate", source: "RE", target: 95, direction: "gte", format: "pct", value: completionRate || null },
+          { name: "Showing Completion Rate", source: "RE", target: 95, direction: "gte", format: "pct", value: completionRate || null, drillKey: "kpiShowingCompletion" },
         ],
       },
       {
         abbrev: "BC", name: "Bookkeeping Coordinator", people: 1,
         kpis: [
-          { name: "Reconciliation Accuracy",  source: "BD", target: 100, direction: "gte", format: "pct", value: null },
-          { name: "Rent Processing Accuracy", source: "BD", target: 100, direction: "gte", format: "pct", value: null },
-          { name: "Vendor Compliance",        source: "BD", target: 100, direction: "gte", format: "pct", value: vendorCompliancePct },
-          { name: "1099 Compliance",          source: "BD", target: 100, direction: "gte", format: "pct", value: vendor1099Pct, targetLabel: "100% by Jan" },
+          { name: "Reconciliation Accuracy",  source: "BD", target: 100, direction: "gte", format: "pct", value: null,                drillKey: "kpiReconciliation" },
+          { name: "Rent Processing Accuracy", source: "BD", target: 100, direction: "gte", format: "pct", value: null,                drillKey: "kpiRentProcessing" },
+          { name: "Vendor Compliance",        source: "BD", target: 100, direction: "gte", format: "pct", value: vendorCompliancePct, drillKey: "kpiVendorCompliance" },
+          { name: "1099 Compliance",          source: "BD", target: 100, direction: "gte", format: "pct", value: vendor1099Pct, targetLabel: "100% by Jan", drillKey: "kpi1099Compliance" },
         ],
       },
     ],
@@ -767,6 +767,95 @@ export async function buildDashboard() {
       summary: `Avg ${avgSdWithheldPct}% withheld · ${sdRecords.length} reconciled move-outs`,
       note: "Per-lease withheld ÷ original SD, averaged. Source: Buildium 'Applied Deposit' transactions on each past lease.",
     },
+
+    // ── Performance by Role KPI drilldowns ──────────────────────────────
+    kpiOccupancyRate: {
+      title: "Portfolio Occupancy Rate",
+      cols: ["Property", "Unit", "Occupied"],
+      rows: query(`SELECT u.unit_number, p.name as pname, u.is_occupied FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 ORDER BY p.name, u.unit_number`).map(r => [r.pname, r.unit_number || "—", r.is_occupied ? "yes" : "no"]),
+      summary: `${occupiedUnits} / ${totalUnits} = ${occupancyRate}% · target ≥95%`,
+      note: `Formula: occupied units ÷ total active units. ${occupiedUnits} of ${totalUnits} active units are flagged IsUnitOccupied in Buildium.`,
+    },
+    kpiDelinquencyRate: {
+      title: "Delinquency Rate",
+      cols: ["Property", "Unit", "Balance"],
+      rows: latestObSnapDate ? query(`SELECT o.total_balance, l.property_id, u.unit_number FROM outstanding_snapshots o LEFT JOIN leases l ON l.id = o.lease_id LEFT JOIN units u ON u.id = l.unit_id WHERE o.snapshot_date = ? ORDER BY o.total_balance DESC`, [latestObSnapDate]).map(r => [propName(r.property_id), r.unit_number || "—", `$${(r.total_balance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`]) : [],
+      summary: `$${(delinquentTotal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} delinquent ÷ $${(totalRentPotential || 0).toLocaleString()} rent roll = ${delinquencyRate}% · target ≤3%`,
+      note: `Formula: sum of TotalBalance across active leases with a positive balance ÷ sum of monthly rent across all active leases. Source: Buildium /leases/outstandingbalances and the rent field on active leases.`,
+    },
+    kpiShowingCompletion: {
+      title: "Showing Completion Rate",
+      cols: ["Unit", "Status", "Scheduled", "Completed", "Rate"],
+      rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.showings_scheduled) return null; const r = Math.round((p.showings_completed / p.showings_scheduled) * 1000) / 10; return [String(u.id), u.status || "—", String(p.showings_scheduled), String(p.showings_completed), `${r}%`]; }).filter(Boolean),
+      summary: `${showingsCompleted} completed ÷ ${showingsScheduled} scheduled = ${completionRate}% · target ≥95%`,
+      note: `Formula: Σ showings_completed ÷ Σ showings_scheduled across all RentEngine units in the trailing 12 months. Source: RentEngine /reporting/leasing-performance/units/{unitId}.`,
+    },
+    kpiReconciliation: {
+      title: "Reconciliation Accuracy",
+      cols: ["Status"],
+      rows: [["Not yet wired — needs GET /v1/bankaccounts/{id}/reconciliations added to the Buildium sync."]],
+      summary: "No data · target 100%",
+      note: `Planned formula: (reconciliations without discrepancies) ÷ (total reconciliations in period). Source will be Buildium /v1/bankaccounts/{bankAccountId}/reconciliations, pulled per active bank account on each sync.`,
+    },
+    kpiRentProcessing: {
+      title: "Rent Processing Accuracy",
+      cols: ["Status"],
+      rows: [["Not yet wired — needs reversed-payment detection on top of per-lease transaction sync."]],
+      summary: "No data · target 100%",
+      note: `Planned formula: (rent/deposit transactions without reversals) ÷ (total rent/deposit transactions). Source will be Buildium /v1/leases/{leaseId}/transactions filtered to rent/deposit types, then counting any transaction whose IsReversed flag is true as an error. Adds ~30s to each sync (one call per active lease, throttled to concurrency 5).`,
+    },
+    kpiVendorCompliance: (() => {
+      const todayMsLocal = todayMs;
+      const rows = (bdVendors || []).map(v => {
+        const tax = v.TaxInformation || v.VendorTaxInformation || v.VendorMessage?.TaxInformation;
+        const ins = v.VendorInsurance || v.VendorMessage?.VendorInsurance;
+        const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
+        const expDate = ins?.ExpirationDate || "";
+        const expMs = expDate ? new Date(expDate).getTime() : 0;
+        const insOk = expMs > todayMsLocal;
+        const compliant = hasTax && insOk;
+        const reasons = [];
+        if (!hasTax) reasons.push("missing TaxPayerId");
+        if (!expDate) reasons.push("no insurance on file");
+        else if (!insOk) reasons.push(`insurance expired ${expDate.slice(0, 10)}`);
+        const name = v.CompanyName || `${v.FirstName || ""} ${v.LastName || ""}`.trim() || `#${v.Id}`;
+        return {
+          name,
+          hasTax, expDate: expDate ? expDate.slice(0, 10) : "—", insOk, compliant,
+          status: compliant ? "compliant" : reasons.join(" + "),
+        };
+      });
+      rows.sort((a, b) => Number(a.compliant) - Number(b.compliant) || a.name.localeCompare(b.name));
+      const okCount = rows.filter(r => r.compliant).length;
+      return {
+        title: "Vendor Compliance",
+        cols: ["Vendor", "TaxPayerId", "Insurance Expires", "Status"],
+        rows: rows.map(r => [r.name, r.hasTax ? "yes" : "no", r.expDate, r.status]),
+        summary: `${okCount} compliant ÷ ${rows.length} active vendors = ${vendorCompliancePct ?? "—"}% · target 100%`,
+        note: `Formula: active vendors where TaxPayerId is populated AND VendorInsurance.ExpirationDate > today, ÷ total active vendors. Source: Buildium /v1/vendors?statuses=Active, reading TaxInformation.TaxPayerId and VendorInsurance.ExpirationDate on each record.`,
+      };
+    })(),
+    kpi1099Compliance: (() => {
+      const rows = (bdVendors || []).filter(v => {
+        const tax = v.TaxInformation || v.VendorTaxInformation || v.VendorMessage?.TaxInformation;
+        return tax && tax.IncludeIn1099 === true;
+      }).map(v => {
+        const tax = v.TaxInformation || v.VendorTaxInformation || v.VendorMessage?.TaxInformation;
+        const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
+        const name = v.CompanyName || `${v.FirstName || ""} ${v.LastName || ""}`.trim() || `#${v.Id}`;
+        const taxType = tax?.TaxPayerIdType || "—";
+        return { name, hasTax, taxType, status: hasTax ? "compliant" : "missing TaxPayerId" };
+      });
+      rows.sort((a, b) => Number(a.hasTax) - Number(b.hasTax) || a.name.localeCompare(b.name));
+      const okCount = rows.filter(r => r.hasTax).length;
+      return {
+        title: "1099 Compliance",
+        cols: ["Vendor", "Tax ID Type", "TaxPayerId", "Status"],
+        rows: rows.map(r => [r.name, r.taxType, r.hasTax ? "yes" : "no", r.status]),
+        summary: `${okCount} with TaxPayerId ÷ ${rows.length} flagged IncludeIn1099 = ${vendor1099Pct ?? "—"}% · target 100% by Jan`,
+        note: `Formula: vendors where IncludeIn1099 is true AND TaxPayerId is populated, ÷ vendors where IncludeIn1099 is true. Source: Buildium /v1/vendors?statuses=Active, reading TaxInformation.IncludeIn1099 and TaxInformation.TaxPayerId.`,
+      };
+    })(),
   };
 
   return { dashboard, drilldowns };

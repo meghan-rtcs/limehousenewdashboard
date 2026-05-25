@@ -335,7 +335,7 @@ const VarA = (function() {
     );
   }
 
-  function RoleCard({ role, mobile }) {
+  function RoleCard({ role, mobile, setDrillKey }) {
     const status = roleStatus(role);
     const onTarget = role.kpis.filter(k2 => ragForKpi(k2) === 'green').length;
     const atRisk = role.kpis.filter(k2 => ragForKpi(k2) === 'amber').length;
@@ -369,8 +369,14 @@ const VarA = (function() {
               const color = RAG_COLOR[rag];
               const v = fmtKpiValue(kpi);
               const src = SOURCE_STYLE[kpi.source] || SOURCE_STYLE.BD;
+              const clickable = !!(kpi.drillKey && setDrillKey);
               return (
-                <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'9px 0', borderTop: i === 0 ? '1px solid #eef0eb' : '1px solid #f3f4f0' }}>
+                <div key={i}
+                  onClick={clickable ? () => setDrillKey(kpi.drillKey) : undefined}
+                  title={clickable ? 'View data behind this metric' : undefined}
+                  style={{ display:'flex', alignItems:'center', gap:10, padding:'9px 6px', margin:'0 -6px', borderTop: i === 0 ? '1px solid #eef0eb' : '1px solid #f3f4f0', cursor: clickable ? 'pointer' : 'default', borderRadius:4, transition:'background 0.12s' }}
+                  onMouseEnter={clickable ? (e) => { e.currentTarget.style.background = '#f4f6f1'; } : undefined}
+                  onMouseLeave={clickable ? (e) => { e.currentTarget.style.background = 'transparent'; } : undefined}>
                   <span style={{ width:10, height:10, borderRadius:'50%', background: color, flexShrink:0 }} />
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
@@ -395,15 +401,15 @@ const VarA = (function() {
     );
   }
 
-  function PerformanceByRole({ SD, mobile }) {
+  function PerformanceByRole({ SD, mobile, setDrillKey }) {
     const data = SD && SD.roleKpis;
     if (!data || !data.roles) return null;
     return (
       <div style={{ marginTop: mobile ? 18 : 26 }}>
-        <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595', margin:'4px 0 10px' }}>Performance by Role</div>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595', margin:'4px 0 10px' }}>Performance by Role · tap any KPI to see the data behind it</div>
         <RoleSummaryBar roles={data.roles} mobile={mobile} />
         <div style={{ display:'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: mobile ? 10 : 12 }}>
-          {data.roles.map(r => <RoleCard key={r.abbrev} role={r} mobile={mobile} />)}
+          {data.roles.map(r => <RoleCard key={r.abbrev} role={r} mobile={mobile} setDrillKey={setDrillKey} />)}
         </div>
       </div>
     );
@@ -435,7 +441,7 @@ const VarA = (function() {
           <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595' }}>CEO View · Financial Performance</div>
         </div>
         <YoYIncomeRows mobile={mobile} SD={SD} showSource={showSource} setDrillKey={setDrillKey} k={k} />
-        <PerformanceByRole SD={SD} mobile={mobile} />
+        <PerformanceByRole SD={SD} mobile={mobile} setDrillKey={setDrillKey} />
       </div>
     );
   }
@@ -494,7 +500,7 @@ const VarA = (function() {
           ))}
         </div>
 
-        {tab === 'ceo' ? <CeoView mobile={mobile} SD={SD} showSource={showSource} setDrillKey={setDrillKey} k={k} /> : <>
+        {tab === 'ceo' ? <CeoView mobile={mobile} SD={SD} showSource={showSource} setDrillKey={setDrillKey} k={k} /> : (<>
 
         {/* Range banner — confirms what the user is looking at */}
         <div style={{
@@ -693,8 +699,9 @@ const VarA = (function() {
             Limehouse PM · Combined RentEngine + Buildium dashboard · YoY = same period last year
           </div>
         </div>
+        </>)}
 
-        {/* Single unified drill-down modal */}
+        {/* Single unified drill-down modal — shared across all tabs */}
         <Modal open={!!drill} onClose={() => setDrillKey(null)}
           title={drill?.title}
           subtitle={drill?.summary}>
@@ -728,7 +735,6 @@ const VarA = (function() {
           )}
           {drill && <DrillTable cols={drill.cols} rows={drill.rows} />}
         </Modal>
-        </>}
       </div>
     );
   }
