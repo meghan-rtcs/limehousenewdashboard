@@ -46,11 +46,12 @@ export async function buildDashboard() {
 
   // ── RentEngine data (still live — not in DB yet) ───────────────────────
   const yearAgoFrom = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1)).toISOString();
-  const [reUnits, reProspects, reAppGroups, bdApplicants] = await Promise.all([
+  const [reUnits, reProspects, reAppGroups, bdApplicants, bdVendors] = await Promise.all([
     safe(rentengine.listUnits(), []),
     safe(rentengine.listProspects(yearAgoFrom, now.toISOString()), []),
     safe(rentengine.listApplicationGroups({ createdAfter: yearAgoFrom, createdBefore: now.toISOString() }), []),
     safe(buildium.listApplicants(), []),
+    safe(buildium.listVendors(["Active"]), []),
   ]);
 
   // Per-unit leasing performance (true days_on_market, showings, calls,
@@ -571,6 +572,71 @@ export async function buildDashboard() {
     rpuByYear[r.year][r.month] = snapUnits > 0 ? Math.round(r.inc / snapUnits) : 0;
   }
 
+  // ── ROLE KPIS (Performance by Role section, CEO view) ──────────────────
+  // Wires 7 KPIs to live Buildium/RentEngine data; remaining KPIs are left
+  // null (rendered as gray dashes). Frontend computes RAG status from
+  // value/target/direction so the data shape stays simple.
+  const occupancyRate = occupancy.rate.value;
+  const delinquencyRate = totalRentPotential > 0
+    ? Math.round((delinquentTotal / totalRentPotential) * 1000) / 10
+    : null;
+
+  // Vendor compliance — active vendors with TaxPayerId AND non-expired insurance.
+  const todayMs = now.getTime();
+  let vendorCompliancePct = null;
+  let vendor1099Pct = null;
+  if (Array.isArray(bdVendors) && bdVendors.length) {
+    const compliant = bdVendors.filter(v => {
+      const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
+      const ins = v.VendorInsurance || v.VendorMessage?.VendorInsurance;
+      const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
+      const insExp = ins?.ExpirationDate ? new Date(ins.ExpirationDate).getTime() : 0;
+      return hasTax && insExp > todayMs;
+    }).length;
+    vendorCompliancePct = Math.round((compliant / bdVendors.length) * 1000) / 10;
+
+    const v1099 = bdVendors.filter(v => {
+      const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
+      return tax && tax.IncludeIn1099 === true;
+    });
+    if (v1099.length) {
+      const ok = v1099.filter(v => {
+        const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
+        return !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
+      }).length;
+      vendor1099Pct = Math.round((ok / v1099.length) * 1000) / 10;
+    }
+  }
+
+  const roleKpis = {
+    asOf: todayIso,
+    vendorCount: Array.isArray(bdVendors) ? bdVendors.length : 0,
+    roles: [
+      {
+        abbrev: "PM", name: "Portfolio Manager", people: 3,
+        kpis: [
+          { name: "Portfolio Occupancy Rate", source: "BD", target: 95, direction: "gte", format: "pct", value: occupancyRate },
+          { name: "Delinquency Rate",         source: "BD", target: 3,  direction: "lte", format: "pct", value: delinquencyRate },
+        ],
+      },
+      {
+        abbrev: "APM", name: "Assistant Property Manager", people: 2,
+        kpis: [
+          { name: "Showing Completion Rate", source: "RE", target: 95, direction: "gte", format: "pct", value: completionRate || null },
+        ],
+      },
+      {
+        abbrev: "BC", name: "Bookkeeping Coordinator", people: 1,
+        kpis: [
+          { name: "Reconciliation Accuracy",  source: "BD", target: 100, direction: "gte", format: "pct", value: null },
+          { name: "Rent Processing Accuracy", source: "BD", target: 100, direction: "gte", format: "pct", value: null },
+          { name: "Vendor Compliance",        source: "BD", target: 100, direction: "gte", format: "pct", value: vendorCompliancePct },
+          { name: "1099 Compliance",          source: "BD", target: 100, direction: "gte", format: "pct", value: vendor1099Pct, targetLabel: "100% by Jan" },
+        ],
+      },
+    ],
+  };
+
   // ── ASSEMBLE ───────────────────────────────────────────────────────────
   const dashboard = {
     meta, spark, financials, occupancy, leasing, marketing,
@@ -579,6 +645,7 @@ export async function buildDashboard() {
     delinquentTrend, incomeMonthly: incomeByMonth, occupancyTrend,
     rentIncreaseDistribution: [], rentCollectionDetail: [], doorsAddedDetail: [],
     goiByYear, rpuByYear, grossByYear, netByYear,
+    roleKpis,
   };
 
   // ── DRILLDOWNS (simplified — full list for each tile) ──────────────────

@@ -268,6 +268,147 @@ const VarA = (function() {
     );
   }
 
+  // ── Performance by Role (CEO view) ───────────────────────────────────
+  function ragForKpi(kpi) {
+    if (kpi.value == null) return 'gray';
+    if (kpi.direction === 'lte') {
+      if (kpi.value <= kpi.target) return 'green';
+      if (kpi.value <= kpi.target * 1.1) return 'amber';
+      return 'red';
+    }
+    if (kpi.value >= kpi.target) return 'green';
+    if (kpi.value >= kpi.target * 0.9) return 'amber';
+    return 'red';
+  }
+  function roleStatus(role) {
+    if (!role.kpis || !role.kpis.length) return 'none';
+    const statuses = role.kpis.map(ragForKpi);
+    if (statuses.includes('red')) return 'red';
+    if (statuses.includes('amber')) return 'amber';
+    if (statuses.every(s => s === 'gray')) return 'gray';
+    return 'green';
+  }
+  const RAG_COLOR = { green:'#3d8c1f', amber:'#d68910', red:'#c0392b', gray:'#aab5a3', none:'#aab5a3' };
+  const RAG_BG    = { green:'#e8f0e0', amber:'#fbeed1', red:'#f6dad6', gray:'#eef0eb', none:'#eef0eb' };
+  const RAG_LABEL = { green:'On track', amber:'At risk', red:'Off track', gray:'No data', none:'—' };
+  const SOURCE_STYLE = {
+    BD: { bg:'#e8e0d4', fg:'#6b5b3e' },
+    RE: { bg:'#dbeafe', fg:'#1e40af' },
+  };
+  function fmtKpiValue(kpi) {
+    if (kpi.value == null) return { num:'—', suffix:'' };
+    const v = kpi.value;
+    if (kpi.format === 'pct') return { num:String(v), suffix:'%' };
+    if (kpi.format === 'days') return { num:String(v), suffix:'d' };
+    if (kpi.format === 'hours') return { num:String(v), suffix:'h' };
+    return { num:String(v), suffix:'' };
+  }
+  function fmtTarget(kpi) {
+    if (kpi.targetLabel) return kpi.targetLabel;
+    const prefix = kpi.direction === 'lte' ? '≤' : '≥';
+    if (kpi.format === 'pct') return `${prefix}${kpi.target}%`;
+    if (kpi.format === 'days') return `${prefix}${kpi.target}d`;
+    if (kpi.format === 'hours') return `${prefix}${kpi.target}h`;
+    return `${prefix}${kpi.target}`;
+  }
+
+  function RoleSummaryBar({ roles, mobile }) {
+    return (
+      <div style={{ background:'#fff', border:'1px solid #e5e8e2', borderRadius:8, display:'grid', gridTemplateColumns: mobile ? `repeat(${Math.min(roles.length, 3)}, 1fr)` : `repeat(${roles.length}, 1fr)`, overflow:'hidden', marginBottom: mobile ? 10 : 12 }}>
+        {roles.map((r, i) => {
+          const status = roleStatus(r);
+          const onTarget = r.kpis.filter(k2 => ragForKpi(k2) === 'green').length;
+          const total = r.kpis.length;
+          const score = total === 0 ? '—' : `${onTarget}/${total} on tgt`;
+          return (
+            <div key={r.abbrev} style={{ padding:'12px 14px', borderLeft: i === 0 ? 'none' : '1px solid #e5e8e2' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:4 }}>
+                <span style={{ width:8, height:8, borderRadius:'50%', background: RAG_COLOR[status] }} />
+                <span style={{ fontSize:10, fontWeight:700, color:'#9aa595', letterSpacing:'0.08em' }}>{r.abbrev}</span>
+              </div>
+              <div style={{ fontSize:12, fontWeight:600, color:'#1c2119', marginBottom:2, lineHeight:1.2 }}>{r.name}</div>
+              <div style={{ fontSize:10, color:'#6b7566' }}>{score}</div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function RoleCard({ role, mobile }) {
+    const status = roleStatus(role);
+    const onTarget = role.kpis.filter(k2 => ragForKpi(k2) === 'green').length;
+    const atRisk = role.kpis.filter(k2 => ragForKpi(k2) === 'amber').length;
+    const offTrack = role.kpis.filter(k2 => ragForKpi(k2) === 'red').length;
+    const total = role.kpis.length;
+    return (
+      <div style={{ background:'#fff', border:'1px solid #e5e8e2', borderRadius:8, padding: mobile ? 12 : 16, display:'flex', flexDirection:'column' }}>
+        <div style={{ display:'flex', alignItems:'flex-start', gap:10, marginBottom:10 }}>
+          <div style={{ width:38, height:38, borderRadius:'50%', border:`2.5px solid ${RAG_COLOR[status]}`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:700, color:'#1c2119', flexShrink:0 }}>
+            {total === 0 ? '—' : `${onTarget}/${total}`}
+          </div>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:13, fontWeight:600, color:'#1c2119', lineHeight:1.2 }}>{role.name}</div>
+            <div style={{ fontSize:10, color:'#6b7566', marginTop:3, display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+              <span>· {role.people} {role.people === 1 ? 'person' : 'people'}</span>
+              {onTarget > 0 && <span style={{ display:'inline-flex', alignItems:'center', gap:3 }}><span style={{ width:6, height:6, borderRadius:'50%', background:RAG_COLOR.green }} />{onTarget} on track</span>}
+              {atRisk > 0 && <span style={{ display:'inline-flex', alignItems:'center', gap:3 }}><span style={{ width:6, height:6, borderRadius:'50%', background:RAG_COLOR.amber }} />{atRisk} at risk</span>}
+              {offTrack > 0 && <span style={{ display:'inline-flex', alignItems:'center', gap:3 }}><span style={{ width:6, height:6, borderRadius:'50%', background:RAG_COLOR.red }} />{offTrack} off track</span>}
+            </div>
+          </div>
+          <span style={{ background: RAG_BG[status], color: RAG_COLOR[status], fontSize:10, fontWeight:600, padding:'3px 9px', borderRadius:10, whiteSpace:'nowrap' }}>{RAG_LABEL[status]}</span>
+        </div>
+        {total === 0 ? (
+          <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', minHeight:80, color:'#9aa595', fontSize:11, fontStyle:'italic', textAlign:'center', padding:'12px 4px' }}>
+            No Buildium / RentEngine KPIs for this role
+          </div>
+        ) : (
+          <div>
+            {role.kpis.map((kpi, i) => {
+              const rag = ragForKpi(kpi);
+              const color = RAG_COLOR[rag];
+              const v = fmtKpiValue(kpi);
+              const src = SOURCE_STYLE[kpi.source] || SOURCE_STYLE.BD;
+              return (
+                <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'9px 0', borderTop: i === 0 ? '1px solid #eef0eb' : '1px solid #f3f4f0' }}>
+                  <span style={{ width:10, height:10, borderRadius:'50%', background: color, flexShrink:0 }} />
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+                      <span style={{ fontSize:12, fontWeight:500, color:'#1c2119' }}>{kpi.name}</span>
+                      <span style={{ background:src.bg, color:src.fg, fontSize:9, fontWeight:700, padding:'1px 6px', borderRadius:3, letterSpacing:'0.04em' }}>{kpi.source}</span>
+                    </div>
+                  </div>
+                  <div style={{ textAlign:'right', flexShrink:0 }}>
+                    <div style={{ fontSize:8, fontWeight:700, color:'#9aa595', letterSpacing:'0.1em', textTransform:'uppercase' }}>Target</div>
+                    <div style={{ fontSize:10, color:'#6b7566', marginTop:1 }}>{fmtTarget(kpi)}</div>
+                  </div>
+                  <div style={{ textAlign:'right', flexShrink:0, minWidth:54 }}>
+                    <span style={{ fontSize:18, fontWeight:700, color }}>{v.num}</span>
+                    {v.suffix && <span style={{ fontSize:11, fontWeight:600, color, marginLeft:1 }}>{v.suffix}</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function PerformanceByRole({ SD, mobile }) {
+    const data = SD && SD.roleKpis;
+    if (!data || !data.roles) return null;
+    return (
+      <div style={{ marginTop: mobile ? 18 : 26 }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595', margin:'4px 0 10px' }}>Performance by Role</div>
+        <RoleSummaryBar roles={data.roles} mobile={mobile} />
+        <div style={{ display:'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: mobile ? 10 : 12 }}>
+          {data.roles.map(r => <RoleCard key={r.abbrev} role={r} mobile={mobile} />)}
+        </div>
+      </div>
+    );
+  }
+
   function CeoView({ mobile, SD, showSource, setDrillKey, k }) {
     const [pw, setPw] = useState('');
     const [unlocked, setUnlocked] = useState(() => sessionStorage.getItem('limehouse_ceo') === '1');
@@ -294,6 +435,7 @@ const VarA = (function() {
           <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595' }}>CEO View · Financial Performance</div>
         </div>
         <YoYIncomeRows mobile={mobile} SD={SD} showSource={showSource} setDrillKey={setDrillKey} k={k} />
+        <PerformanceByRole SD={SD} mobile={mobile} />
       </div>
     );
   }

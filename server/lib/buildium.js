@@ -66,5 +66,7 @@ export const buildium = {
     listAll("/applicants", {}, { pageSize: 1000, max: 50000 }),
   leaseTransactions: (leaseId) =>
     listAll(`/leases/${leaseId}/transactions`, {}, { pageSize: 1000, max: 5000 }),
+  listVendors: (statuses = ["Active"]) =>
+    listAll("/vendors", { statuses }, { pageSize: 1000, max: 20000 }),
   raw: request,
 };
