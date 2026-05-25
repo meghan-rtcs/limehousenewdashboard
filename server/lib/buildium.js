@@ -70,6 +70,10 @@ export const buildium = {
     listAll("/vendors", { statuses }, { pageSize: 1000, max: 20000 }),
   listUserRoles: () =>
     listAll("/userroles", {}, { pageSize: 1000, max: 5000 }),
+  listBankAccounts: () =>
+    listAll("/bankaccounts", {}, { pageSize: 100, max: 1000 }),
+  listReconciliations: (bankAccountId) =>
+    listAll(`/bankaccounts/${bankAccountId}/reconciliations`, {}, { pageSize: 100, max: 5000 }),
   listUsers: (params = {}) =>
     listAll("/users", params, { pageSize: 1000, max: 20000 }),
   raw: request,

@@ -608,6 +608,79 @@ export async function buildDashboard() {
     }
   }
 
+  // ── RECONCILIATION ACCURACY ────────────────────────────────────────────
+  // Pull reconciliations for each active bank account. "Accuracy" = % of
+  // expected monthly reconciliations (one per active bank account per month)
+  // completed in the last 12 fully-elapsed months.
+  let reconAccuracyPct = null;
+  let reconTotalDone = 0;
+  let reconTotalExpected = 0;
+  const reconRowsRaw = [];
+  const bankAccounts = await safe(buildium.listBankAccounts(), []);
+  const activeBankAccounts = (bankAccounts || []).filter(b => b.GLAccount?.IsActive !== false);
+  if (activeBankAccounts.length) {
+    const expectedMonths = [];
+    const mc = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    for (let i = 0; i < 12; i++) {
+      expectedMonths.push(`${mc.getFullYear()}-${String(mc.getMonth() + 1).padStart(2, "0")}`);
+      mc.setMonth(mc.getMonth() - 1);
+    }
+    const reconLists = await pMap(activeBankAccounts, 5, b => safe(buildium.listReconciliations(b.Id), []));
+    activeBankAccounts.forEach((b, i) => {
+      const finished = (reconLists[i] || []).filter(r => r.IsFinished);
+      finished.sort((a, c) => (c.StatementEndingDate || "").localeCompare(a.StatementEndingDate || ""));
+      const doneMonths = new Set(finished.map(r => (r.StatementEndingDate || "").slice(0, 7)));
+      const monthsDone = expectedMonths.filter(m => doneMonths.has(m)).length;
+      reconTotalExpected += expectedMonths.length;
+      reconTotalDone += monthsDone;
+      reconRowsRaw.push({
+        name: b.GLAccount?.Name || `#${b.Id}`,
+        lastFinished: finished[0]?.StatementEndingDate || null,
+        monthsDone,
+      });
+    });
+    if (reconTotalExpected > 0) {
+      reconAccuracyPct = Math.round((reconTotalDone / reconTotalExpected) * 1000) / 10;
+    }
+    reconRowsRaw.sort((a, c) => c.monthsDone - a.monthsDone || a.name.localeCompare(c.name));
+  }
+
+  // ── RENT PROCESSING ACCURACY ───────────────────────────────────────────
+  // For every active lease, count Payment vs ReversePayment transactions in
+  // the trailing 90 days. accuracy = 1 − (reversals ÷ payments). Throttled
+  // to concurrency 5 to stay under Buildium's rate limit. Adds ~30–60s per
+  // full sync; cached for 10 min.
+  let rentProcessingPct = null;
+  let rpPayments = 0;
+  let rpReversals = 0;
+  const rentReversalRowsRaw = [];
+  const activeLeasesForRP = allLeasesAPI.filter(l => l.LeaseStatus === "Active");
+  const rpWindowStartIso = new Date(now.getTime() - 90 * 86400000).toISOString().slice(0, 10);
+  if (activeLeasesForRP.length) {
+    const rpTxnLists = await pMap(activeLeasesForRP, 5, l => safe(buildium.leaseTransactions(l.Id), []));
+    activeLeasesForRP.forEach((lease, i) => {
+      const txs = rpTxnLists[i] || [];
+      for (const t of txs) {
+        if (!t.Date || t.Date < rpWindowStartIso) continue;
+        const type = t.TransactionTypeEnum || t.TransactionType;
+        if (type === "Payment") rpPayments++;
+        else if (type === "ReversePayment") {
+          rpReversals++;
+          rentReversalRowsRaw.push({
+            propertyId: lease.PropertyId,
+            unitNumber: lease.UnitNumber,
+            date: t.Date,
+            amount: Math.abs(Number(t.TotalAmount) || 0),
+          });
+        }
+      }
+    });
+    if (rpPayments > 0) {
+      rentProcessingPct = Math.round(((rpPayments - rpReversals) / rpPayments) * 1000) / 10;
+    }
+    rentReversalRowsRaw.sort((a, c) => (c.date || "").localeCompare(a.date || ""));
+  }
+
   const roleKpis = {
     asOf: todayIso,
     vendorCount: Array.isArray(bdVendors) ? bdVendors.length : 0,
@@ -628,8 +701,8 @@ export async function buildDashboard() {
       {
         abbrev: "BC", name: "Bookkeeping Coordinator", people: 1,
         kpis: [
-          { name: "Reconciliation Accuracy",  source: "BD", target: 100, direction: "gte", format: "pct", value: null,                drillKey: "kpiReconciliation" },
-          { name: "Rent Processing Accuracy", source: "BD", target: 100, direction: "gte", format: "pct", value: null,                drillKey: "kpiRentProcessing" },
+          { name: "Reconciliation Accuracy",  source: "BD", target: 100, direction: "gte", format: "pct", value: reconAccuracyPct,    drillKey: "kpiReconciliation" },
+          { name: "Rent Processing Accuracy", source: "BD", target: 100, direction: "gte", format: "pct", value: rentProcessingPct,   drillKey: "kpiRentProcessing" },
           { name: "Vendor Compliance",        source: "BD", target: 100, direction: "gte", format: "pct", value: vendorCompliancePct, drillKey: "kpiVendorCompliance" },
           { name: "1099 Compliance",          source: "BD", target: 100, direction: "gte", format: "pct", value: vendor1099Pct, targetLabel: "100% by Jan", drillKey: "kpi1099Compliance" },
         ],
@@ -792,17 +865,33 @@ export async function buildDashboard() {
     },
     kpiReconciliation: {
       title: "Reconciliation Accuracy",
-      cols: ["Status"],
-      rows: [["Not yet wired — needs GET /v1/bankaccounts/{id}/reconciliations added to the Buildium sync."]],
-      summary: "No data · target 100%",
-      note: `Planned formula: (reconciliations without discrepancies) ÷ (total reconciliations in period). Source will be Buildium /v1/bankaccounts/{bankAccountId}/reconciliations, pulled per active bank account on each sync.`,
+      cols: ["Bank Account", "Last Reconciled", "Months Done (last 12)", "Status"],
+      rows: reconRowsRaw.map(r => [
+        r.name,
+        r.lastFinished || "never",
+        `${r.monthsDone} / 12`,
+        r.monthsDone === 12 ? "on track" : (r.monthsDone === 0 ? "never reconciled" : "lagging"),
+      ]),
+      summary: reconAccuracyPct != null
+        ? `${reconTotalDone} / ${reconTotalExpected} expected reconciliations completed = ${reconAccuracyPct}% · target 100%`
+        : "No active bank accounts found",
+      note: `Formula: across all ${activeBankAccounts.length} active bank accounts, count how many of the last 12 completed months have a finished reconciliation (StatementEndingDate falls in that month and IsFinished=true). Accuracy = done ÷ expected (${activeBankAccounts.length} accounts × 12 months = ${activeBankAccounts.length * 12} expected). Source: Buildium /v1/bankaccounts and /v1/bankaccounts/{id}/reconciliations.`,
     },
     kpiRentProcessing: {
       title: "Rent Processing Accuracy",
-      cols: ["Status"],
-      rows: [["Not yet wired — needs reversed-payment detection on top of per-lease transaction sync."]],
-      summary: "No data · target 100%",
-      note: `Planned formula: (rent/deposit transactions without reversals) ÷ (total rent/deposit transactions). Source will be Buildium /v1/leases/{leaseId}/transactions filtered to rent/deposit types, then counting any transaction whose IsReversed flag is true as an error. Adds ~30s to each sync (one call per active lease, throttled to concurrency 5).`,
+      cols: ["Property", "Unit", "Reversed Date", "Amount"],
+      rows: rentReversalRowsRaw.length
+        ? rentReversalRowsRaw.map(r => [
+            propName(r.propertyId),
+            r.unitNumber || "—",
+            r.date,
+            `$${r.amount.toFixed(2)}`,
+          ])
+        : [["—", "—", "—", "No reversed payments in the last 90 days"]],
+      summary: rentProcessingPct != null
+        ? `${rpReversals} reversed ÷ ${rpPayments} payments in last 90 days = ${rentProcessingPct}% clean · target 100%`
+        : "No payments recorded in last 90 days",
+      note: `Formula: 1 − (ReversePayment count ÷ Payment count) across every active lease, looking at the trailing 90 days. Each reversal is a tenant payment that bounced, was charged back, or had to be undone for any reason. Source: Buildium /v1/leases/{leaseId}/transactions filtered by TransactionTypeEnum = Payment / ReversePayment. ${activeLeasesForRP.length} active leases checked.`,
     },
     kpiVendorCompliance: (() => {
       const todayMsLocal = todayMs;
