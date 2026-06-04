@@ -1,4 +1,5 @@
 import { query, queryOne } from "./db.js";
+import { buildLeadSimpleKpis } from "./ls-aggregator.js";
 import { rentengine } from "./rentengine.js";
 import { buildium } from "./buildium.js";
 
@@ -947,5 +948,18 @@ export async function buildDashboard() {
     })(),
   };
 
-  return { dashboard, drilldowns };
+  let lsKpis = null, lsDrilldowns = {}, lsSummary = null;
+  try {
+    const ls = buildLeadSimpleKpis();
+    lsKpis = ls.lsKpis;
+    lsDrilldowns = ls.lsDrilldowns;
+    lsSummary = ls.lsSummary;
+  } catch (err) {
+    console.warn("[agg] LeadSimple KPIs failed:", err.message);
+  }
+
+  return {
+    dashboard: { ...dashboard, lsKpis, lsSummary },
+    drilldowns: { ...drilldowns, ...lsDrilldowns },
+  };
 }

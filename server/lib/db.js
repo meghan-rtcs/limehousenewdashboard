@@ -231,6 +231,28 @@ export function clearTable(table) {
   getDb().exec(`DELETE FROM ${table}`);
 }
 
+// Atomically replace a table's entire contents: deletes existing rows and
+// inserts the new ones inside a single transaction, so an interruption can
+// never leave the table empty or half-populated.
+export function replaceTable(table, rows, columns) {
+  const db = getDb();
+  const placeholders = columns.map(() => "?").join(", ");
+  const cols = columns.join(", ");
+  const stmt = db.prepare(
+    `INSERT OR REPLACE INTO ${table} (${cols}) VALUES (${placeholders})`
+  );
+  const tx = db.transaction((data) => {
+    db.exec(`DELETE FROM ${table}`);
+    let count = 0;
+    for (const row of data) {
+      stmt.run(...columns.map((c) => row[c] ?? null));
+      count++;
+    }
+    return count;
+  });
+  return tx(rows);
+}
+
 export function query(sql, params = []) {
   return getDb().prepare(sql).all(...params);
 }

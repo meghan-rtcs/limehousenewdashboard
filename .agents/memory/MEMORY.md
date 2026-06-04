@@ -1,0 +1,3 @@
+- [LeadSimple rate limits & sync](leadsimple-sync.md) — LS enforces a per-WINDOW record limit (not just request count); naive clients silently drop completed-task/process pages. Pull is slow, decoupled to overnight cron.
+- [Dashboard cache refresh](dashboard-cache-refresh.md) — index.js serves an in-memory dashboard cache; scheduled syncs only write SQLite, so they need a post-sync hook to rebuild it or overnight data won't surface.
+- [SQLite snapshot-table writes](sqlite-snapshot-writes.md) — tables rebuilt wholesale must replace atomically AND only when the upstream pull fully succeeded, or a rate-limited run wipes/partially-drops good data.

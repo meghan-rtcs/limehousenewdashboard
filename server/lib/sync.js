@@ -581,6 +581,13 @@ export async function syncAll(type = "full") {
       [completedAt, errors.length ? "partial" : "success", totalRecords,
        errors.length ? JSON.stringify(errors) : null, logId]);
 
+    // NOTE: LeadSimple is intentionally NOT synced here. Its API enforces a
+    // strict per-window record rate limit, so a full pull takes several minutes
+    // of paced requests. Running it inside the frequent Buildium sync caused
+    // repeated rate-limit churn. LeadSimple is synced on its own slow, overnight
+    // schedule (see scheduler.js -> runLeadSimpleSync); the dashboard reads the
+    // last persisted LeadSimple data from SQLite and never blocks on live calls.
+
     console.log(`[sync] ${type} sync completed at ${completedAt} — ${totalRecords} records, ${errors.length} errors`);
     return { ok: true, errors, totalRecords, completedAt };
   } catch (err) {

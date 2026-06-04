@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { getDb, query as dbQuery } from "./lib/db.js";
 import { syncAll, testGL } from "./lib/sync.js";
 import { buildDashboard } from "./lib/aggregator.js";
-import { startScheduler, runSync } from "./lib/scheduler.js";
+import { startScheduler, runSync, runLeadSimpleSync, setPostSyncHook } from "./lib/scheduler.js";
 import { buildium } from "./lib/buildium.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -13,6 +13,8 @@ const PORT = Number(process.env.PORT || 5000);
 
 // Initialize database on startup
 getDb();
+import { migrateLeadSimple } from "./lib/ls-sync.js";
+migrateLeadSimple();
 
 const app = express();
 app.disable("etag");
@@ -23,20 +25,35 @@ app.use(express.json());
 let cachedPayload = null;
 let cachedAt = null;
 let building = false;
+let rebuildPending = false;
 
 async function refreshDashboard() {
-  if (building) return;
+  // If a build is already running, mark that another rebuild is needed and
+  // return. The in-flight build will re-run once on completion so a refresh
+  // requested mid-build (e.g. two scheduled syncs finishing back-to-back) still
+  // picks up the latest DB state instead of being silently dropped.
+  if (building) {
+    rebuildPending = true;
+    return;
+  }
   building = true;
   try {
-    cachedPayload = await buildDashboard();
-    cachedAt = Date.now();
-    console.log(`[server] Dashboard built at ${new Date(cachedAt).toISOString()}`);
+    do {
+      rebuildPending = false;
+      cachedPayload = await buildDashboard();
+      cachedAt = Date.now();
+      console.log(`[server] Dashboard built at ${new Date(cachedAt).toISOString()}`);
+    } while (rebuildPending);
   } catch (err) {
     console.error("[server] Dashboard build error:", err);
   } finally {
     building = false;
   }
 }
+
+// Let scheduled syncs (Buildium + overnight LeadSimple) rebuild the served
+// dashboard cache once their DB writes complete.
+setPostSyncHook(refreshDashboard);
 
 app.get("/api/dashboard", async (req, res) => {
   if (!cachedPayload) {
@@ -64,6 +81,26 @@ app.post("/api/sync", async (req, res) => {
     res.json({ ok: result.ok, errors: result.errors, records: result.totalRecords });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── LeadSimple sync (slow / rate-limited; runs in background) ─────────────────
+// Kicks off the LeadSimple pull without blocking the request. The pull paces
+// itself around LeadSimple's per-window record rate limit (can take several
+// minutes), persists to SQLite, and the dashboard reads the last snapshot.
+app.post("/api/sync-leadsimple", (req, res) => {
+  runLeadSimpleSync(); // fire-and-forget; guarded against concurrent runs
+  res.json({ ok: true, started: true, note: "LeadSimple sync started in background; this can take several minutes due to rate limits." });
+});
+
+app.get("/api/leadsimple-status", (req, res) => {
+  try {
+    const tasks = dbQuery("SELECT COUNT(*) AS total, SUM(completed_at IS NOT NULL) AS completed FROM ls_tasks")[0] || {};
+    const processes = dbQuery("SELECT COUNT(*) AS c FROM ls_processes")[0]?.c || 0;
+    const lastSynced = dbQuery("SELECT MAX(synced_at) AS at FROM ls_tasks")[0]?.at || null;
+    res.json({ tasks: tasks.total || 0, completedTasks: tasks.completed || 0, processes, lastSynced });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
