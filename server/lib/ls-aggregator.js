@@ -342,26 +342,55 @@ export function buildLeadSimpleKpis() {
       AND created_at >= ?
   `, [PROCESS_TYPES.RENEWAL, new Date(now.getFullYear(), now.getMonth() - 12, 1).toISOString()]);
 
-  const renewalRate = (() => {
-    if (renewalProcesses.length === 0) return { rate: null, renewed: 0, total: 0, rows: [] };
-    // "won" = closed + stage indicates renewal completed (not non-renewal)
-    const renewed = renewalProcesses.filter(p =>
-      p.closed_at && p.stage_name &&
-      !p.stage_name.toLowerCase().includes("non-renewal") &&
-      !p.stage_name.toLowerCase().includes("not renewing")
+  // A renewal process only counts as an actual renewal if the lease was renewed.
+  // Any outcome where the tenancy ends -- owner/tenant non-renewal, owner
+  // terminating management, owner relisting, owner selling the property -- is NOT
+  // a renewal even though the process is "closed". Canceled processes are never
+  // renewals by definition.
+  const isNonRenewalOutcome = (stage) => {
+    const s = (stage || "").toLowerCase();
+    return (
+      s.includes("non-renewal") ||
+      s.includes("not renewing") ||
+      s.includes("terminating management") || // owner terminating management
+      s.includes("relisting") ||              // owner relisting
+      s.includes("selling")                   // owner selling property
     );
+  };
+  // Renewed = the lease was actually renewed (positive terminal outcome), not
+  // merely "closed". Checked positively so a new canceled/non-renewal stage can
+  // never be mistaken for a renewal.
+  const isRenewed = (p) =>
+    p.stage_status === "completed" &&
+    (p.stage_name || "").toLowerCase().includes("renewed") &&
+    !isNonRenewalOutcome(p.stage_name);
+  const renewalRate = (() => {
+    if (renewalProcesses.length === 0) {
+      return { rate: null, renewed: 0, total: 0, pending: 0, rows: [] };
+    }
+    // The rate only counts processes that have reached a renewal DECISION:
+    // either renewed, or a non-renewal outcome (owner/tenant non-renewal, owner
+    // terminating management, relisting, selling). Still-in-progress processes
+    // ("Send Lease", "Upcoming") have no decision yet, so including them in the
+    // denominator would understate the true renewal rate -- they're excluded and
+    // surfaced separately as `pending`.
+    const isDecided = (p) => isRenewed(p) || isNonRenewalOutcome(p.stage_name);
+    const decided = renewalProcesses.filter(isDecided);
+    const renewed = decided.filter(isRenewed);
     const rows = renewalProcesses.map(p => ({
       name: p.name,
       stage: p.stage_name,
       status: p.stage_status,
       created_at: p.created_at,
       closed_at: p.closed_at || "open",
-      renewed: renewed.some(r => r.id === p.id),
+      renewed: isRenewed(p),
+      decided: isDecided(p),
     }));
     return {
-      rate: pct(renewed.length, renewalProcesses.length),
+      rate: pct(renewed.length, decided.length),
       renewed: renewed.length,
-      total: renewalProcesses.length,
+      total: decided.length,
+      pending: renewalProcesses.length - decided.length,
       rows,
     };
   })();
@@ -592,7 +621,7 @@ export function buildLeadSimpleKpis() {
             name: "Lease Renewal Rate",
             source: "LS+BD", target: 70, direction: "gte", format: "pct",
             value: renewalRate.rate,
-            detail: `${renewalRate.renewed} renewed / ${renewalRate.total} processes (trailing 12 mo)`,
+            detail: `${renewalRate.renewed} renewed / ${renewalRate.total} decided (${renewalRate.pending} still in progress, trailing 12 mo)`,
             drillKey: "lsRenewalRate",
             partial: true,
             partialNote: "LS process outcomes -- combine with Buildium lease data for full picture",
@@ -688,8 +717,8 @@ export function buildLeadSimpleKpis() {
       rows: renewalRate.rows.map(r => [
         r.name, r.stage, r.status, fmtDate(r.created_at), r.closed_at === "open" ? "open" : fmtDate(r.closed_at), yesNo(r.renewed),
       ]),
-      summary: `${renewalRate.rate ?? "n/a"}% renewed (${renewalRate.renewed}/${renewalRate.total}) -- target >= 70%`,
-      note: "Lease Renewal Processes in trailing 12 months. 'Renewed' = closed and not in a non-renewal stage. Combine with Buildium lease data for full metric.",
+      summary: `${renewalRate.rate ?? "n/a"}% renewed (${renewalRate.renewed}/${renewalRate.total} decided; ${renewalRate.pending} still in progress) -- target >= 70%`,
+      note: "Lease Renewal Processes in trailing 12 months. Rate = renewed / decided, where 'decided' excludes still-in-progress processes (e.g. Send Lease, Upcoming). 'Renewed' = a completed Lease Renewed outcome; non-renewal outcomes (owner/tenant non-renewal, owner terminating management, owner relisting, owner selling) count as not renewed. Combine with Buildium lease data for full metric.",
     },
     lsPropertyReadiness: {
       title: "Property Readiness -- Move In Tasks (90d)",
