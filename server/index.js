@@ -6,6 +6,7 @@ import { syncAll, testGL } from "./lib/sync.js";
 import { buildDashboard } from "./lib/aggregator.js";
 import { startScheduler, runSync, runLeadSimpleSync, setPostSyncHook } from "./lib/scheduler.js";
 import { buildium } from "./lib/buildium.js";
+import { getBundle, warmBundle } from "./lib/bundle.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_ROOT = path.join(__dirname, "..", "Limehouse Revamp");
@@ -276,6 +277,24 @@ app.get("/debug/buildium-users", async (req, res) => {
   }
 });
 
+// ── Precompiled JSX bundle ───────────────────────────────────────────────────
+// One ready-to-run JS file compiled server-side (see lib/bundle.js). Replaces
+// shipping @babel/standalone + raw .jsx and compiling in the browser on every
+// load. Cacheable via ETag so reloads are instant.
+app.get("/app-bundle.js", (req, res) => {
+  try {
+    const { code, etag } = getBundle();
+    res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache"); // revalidate via ETag, don't refetch body
+    res.setHeader("ETag", etag);
+    if (req.headers["if-none-match"] === etag) { res.status(304).end(); return; }
+    res.send(code);
+  } catch (err) {
+    console.error("[bundle] serve error:", err.message);
+    res.status(500).type("application/javascript").send(`console.error(${JSON.stringify("Bundle compile failed: " + err.message)});`);
+  }
+});
+
 // ── Static files ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.sendFile(path.join(STATIC_ROOT, "Limehouse Dashboard - A.html"));
@@ -286,6 +305,9 @@ app.use(express.static(STATIC_ROOT, { etag: false, lastModified: false }));
 app.listen(PORT, "0.0.0.0", async () => {
   console.log(`[server] Listening on http://0.0.0.0:${PORT}`);
   console.log(`[server] Static root: ${STATIC_ROOT}`);
+
+  // Precompile the frontend bundle so the first page load is already warm
+  warmBundle();
 
   // Start the cron scheduler
   startScheduler();

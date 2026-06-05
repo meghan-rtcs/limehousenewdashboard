@@ -35,6 +35,39 @@ function businessHoursBetween(start, end) {
   return Math.round(hours * (5 / 7) * 10) / 10;
 }
 
+// ── On-time helpers (calendar-date based, business timezone) ─────────────────
+// LeadSimple due dates are effectively day-based: a task "due Mar 9" should count
+// as on time if it's completed any time that day, even if the completed_at
+// timestamp is a few hours past the due_at time-of-day (which just reflects when
+// the task was scheduled, not a hard intraday deadline). So we compare CALENDAR
+// DATES, not exact timestamps, and we do it in the business's timezone (ET) so a
+// late-evening ET completion isn't bumped to the next UTC day.
+const BIZ_TZ = "America/New_York";
+const _dateFmt = new Intl.DateTimeFormat("en-CA", {
+  timeZone: BIZ_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+});
+function bizDate(ts) {
+  if (!ts) return null;
+  const d = new Date(ts);
+  if (isNaN(d)) return null;
+  return _dateFmt.format(d); // YYYY-MM-DD, safe for string comparison
+}
+// On time = completed on or before the due date's calendar day.
+function isCompletedOnTime(due_at, completed_at) {
+  if (!due_at) return true;            // no due date -> treat as on time
+  if (!completed_at) return false;     // due but not completed -> not on time
+  const dd = bizDate(due_at), cd = bizDate(completed_at);
+  if (!dd || !cd) return true;         // unparseable -> don't penalize
+  return cd <= dd;
+}
+// Late = completed strictly after the due date's calendar day.
+function isLate(due_at, completed_at) {
+  if (!due_at || !completed_at) return false;
+  const dd = bizDate(due_at), cd = bizDate(completed_at);
+  if (!dd || !cd) return false;
+  return cd > dd;
+}
+
 // ── Main builder ────────────────────────────────────────────────────────────
 export function buildLeadSimpleKpis() {
   const now = new Date();
@@ -72,9 +105,7 @@ export function buildLeadSimpleKpis() {
     if (tasks.length === 0) return { rate: null, onTime: 0, total: 0, rows: [] };
     let onTime = 0;
     const rows = tasks.map(t => {
-      const due = t.due_at ? new Date(t.due_at) : null;
-      const comp = new Date(t.completed_at);
-      const isOnTime = due ? comp <= due : true; // no due date = considered on time
+      const isOnTime = isCompletedOnTime(t.due_at, t.completed_at);
       if (isOnTime) onTime++;
       return {
         description: t.description || "(no description)",
@@ -115,10 +146,7 @@ export function buildLeadSimpleKpis() {
       `, [pid]);
       const proc = queryOne("SELECT name, process_type_name, stage_name FROM ls_processes WHERE id = ?", [pid]);
       const anySkipped = tasks.some(t => t.skipped);
-      const anyLate = tasks.some(t => {
-        if (!t.completed_at || !t.due_at) return false;
-        return new Date(t.completed_at) > new Date(t.due_at);
-      });
+      const anyLate = tasks.some(t => isLate(t.due_at, t.completed_at));
       const anyIncomplete = tasks.some(t => !t.completed_at && !t.skipped);
       const isCompliant = !anySkipped && !anyLate;
       if (isCompliant) compliant++;
@@ -127,7 +155,7 @@ export function buildLeadSimpleKpis() {
         type: proc?.process_type_name || "unknown",
         taskCount: tasks.length,
         skipped: tasks.filter(t => t.skipped).length,
-        late: tasks.filter(t => t.completed_at && t.due_at && new Date(t.completed_at) > new Date(t.due_at)).length,
+        late: tasks.filter(t => isLate(t.due_at, t.completed_at)).length,
         incomplete: tasks.filter(t => !t.completed_at && !t.skipped).length,
         compliant: isCompliant,
       });
@@ -215,7 +243,7 @@ export function buildLeadSimpleKpis() {
     if (aaFollowUpTasks.length === 0) return { rate: null, onTime: 0, total: 0, rows: [] };
     let onTime = 0;
     const rows = aaFollowUpTasks.map(t => {
-      const isOnTime = !t.due_at || new Date(t.completed_at) <= new Date(t.due_at);
+      const isOnTime = isCompletedOnTime(t.due_at, t.completed_at);
       if (isOnTime) onTime++;
       return {
         description: t.description,
@@ -286,7 +314,7 @@ export function buildLeadSimpleKpis() {
     if (renewalTasks.length === 0) return { rate: null, onTime: 0, total: 0, rows: [] };
     let onTime = 0;
     const rows = renewalTasks.map(t => {
-      const isOnTime = !t.due_at || new Date(t.completed_at) <= new Date(t.due_at);
+      const isOnTime = isCompletedOnTime(t.due_at, t.completed_at);
       if (isOnTime) onTime++;
       return {
         description: t.description,
@@ -359,7 +387,7 @@ export function buildLeadSimpleKpis() {
     if (tasks.length === 0) return { rate: null, onTime: 0, total: 0, rows: [] };
     let onTime = 0;
     const rows = tasks.map(t => {
-      const isOnTime = !t.due_at || new Date(t.completed_at) <= new Date(t.due_at);
+      const isOnTime = isCompletedOnTime(t.due_at, t.completed_at);
       if (isOnTime) onTime++;
       return {
         description: t.description,
@@ -589,7 +617,7 @@ export function buildLeadSimpleKpis() {
         r.description, r.process, fmtDate(r.due_at), fmtDate(r.completed_at), yesNo(r.on_time),
       ]),
       summary: `${aaTaskCompletion.rate ?? "n/a"}% on time (${aaTaskCompletion.onTime}/${aaTaskCompletion.total}) -- target >= 95%`,
-      note: "Tasks assigned to Belinda (assistant@limehousepm.com) completed in the trailing 90 days. On time = completed_at <= due_at.",
+      note: "Tasks assigned to Belinda (assistant@limehousepm.com) completed in the trailing 90 days. On time = completed on or before the due date's calendar day (ET).",
     },
     lsWorkflowCompliance: {
       title: "Workflow Compliance -- Administrative Assistant (90d)",

@@ -29,9 +29,8 @@
 <div id="root"></div>
 <div id="boot"><div class="spinner"></div><div id="boot-msg">Loading data from Buildium and RentEngine…</div></div>
 
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
 
 <script>
 (async function bootstrap() {
@@ -55,29 +54,26 @@
   }
 
   try {
-    const payload = await fetchData();
+    // Fetch data and the precompiled component bundle in parallel. The bundle is
+    // server-compiled once and ETag-cached, so this is a fast (often 304) request
+    // that overlaps with the data fetch instead of blocking on browser Babel.
+    const [payload, bundleCode] = await Promise.all([
+      fetchData(),
+      fetch('/app-bundle.js').then(r => {
+        if (!r.ok) throw new Error('Failed to load app bundle (' + r.status + ')');
+        return r.text();
+      }),
+    ]);
+
     window.LIMEHOUSE_DATA = payload.dashboard;
     window.LIMEHOUSE_DRILLDOWNS = payload.drilldowns;
     window.LIMEHOUSE_SYNC = payload.sync;
     window.LIMEHOUSE_LS_KPIS = payload.dashboard.lsKpis;
     window.LIMEHOUSE_LS_SUMMARY = payload.dashboard.lsSummary;
 
-    const scripts = [
-      'tweaks-panel.jsx',
-      'components/shared.jsx',
-      'components/var-a.jsx',
-      'app-a.jsx',
-    ];
-
-    for (const src of scripts) {
-      const r = await fetch(src + '?v=' + Date.now(), { cache: 'no-store' });
-      if (!r.ok) throw new Error('Failed to load ' + src);
-      const code = await r.text();
-      const compiled = Babel.transform(code, { presets: ['react'] }).code;
-      const tag = document.createElement('script');
-      tag.text = '(function(){\n' + compiled + '\n})();';
-      document.body.appendChild(tag);
-    }
+    const tag = document.createElement('script');
+    tag.text = bundleCode;
+    document.body.appendChild(tag);
     bootEl.remove();
   } catch (err) {
     console.error(err);
