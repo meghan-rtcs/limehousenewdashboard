@@ -4,3 +4,4 @@
 - [LeadSimple on-time is date-based](leadsimple-on-time-dates.md) — on-time/compliance KPIs compare ET calendar dates (not UTC timestamps); duration metrics (24h/48h) stay timestamp-based.
 - [Frontend JSX bundling](frontend-jsx-bundling.md) — .jsx is compiled server-side once and cached, served at /app-bundle.js; production React, no browser Babel; JSX edits need a restart.
 - [Lease Renewal Rate semantics](leadsimple-renewal-rate.md) — renewed = completed "Lease Renewed" (positive check); denominator = decided only (exclude in-progress Send Lease/Upcoming).
+- [Dashboard location labels](dashboard-location-labels.md) — drilldowns show addresses not IDs; Buildium=propName+unit_number, RentEngine=address.formatted_address (no unit_number field).
