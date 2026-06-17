@@ -282,13 +282,45 @@ export function calculateBonus(role, scores) {
   if (kpiCount === 0) return { total: 0, max: role.maxBonus, slotValue: 0, slots: [] };
 
   const slotValue = role.maxBonus / kpiCount;
+
+  // Exact (unrounded) payout per slot: (score/3) of the slot's value; a KPI with
+  // no data pays $0. The exact sum can never exceed maxBonus (each score/3 ≤ 1).
+  // Rounding each slot independently, however, can push the total $1 over the cap
+  // (e.g. a 3-KPI / $500 role at a perfect score: round($166.67) × 3 = $501), so
+  // we round with the largest-remainder method. This keeps payouts in whole
+  // dollars while guaranteeing the slots sum exactly to the (rounded) total, and
+  // therefore never blow past the role's cap.
+  const exact = role.kpis.map((kpi, i) => {
+    const s = scores[i];
+    return s.score != null ? (s.score / 3) * slotValue : 0;
+  });
+  const payouts = largestRemainderRound(exact);
+
   let total = 0;
   const slots = role.kpis.map((kpi, i) => {
     const s = scores[i];
-    const payout = s.score != null ? Math.round((s.score / 3) * slotValue) : 0;
-    total += payout;
-    return { kpiId: kpi.id, score: s.score, label: s.label, tier: s.tier, slotValue: Math.round(slotValue), payout };
+    total += payouts[i];
+    return { kpiId: kpi.id, score: s.score, label: s.label, tier: s.tier, slotValue: Math.round(slotValue), payout: payouts[i] };
   });
 
   return { total, max: role.maxBonus, slotValue: Math.round(slotValue), slots };
+}
+
+// Round an array of non-negative values to whole numbers whose sum equals the
+// rounded sum of the inputs. The leftover dollars are handed to the slots with
+// the largest fractional remainders. Because the inputs here can never sum to
+// more than the role's cap, neither can the result.
+function largestRemainderRound(values) {
+  const floors = values.map(v => Math.floor(v));
+  const target = Math.round(values.reduce((a, b) => a + b, 0));
+  let remainder = target - floors.reduce((a, b) => a + b, 0);
+  const byFrac = values
+    .map((v, i) => ({ i, frac: v - Math.floor(v) }))
+    .sort((a, b) => b.frac - a.frac);
+  const result = floors.slice();
+  for (let k = 0; k < byFrac.length && remainder > 0; k++) {
+    result[byFrac[k].i] += 1;
+    remainder--;
+  }
+  return result;
 }
