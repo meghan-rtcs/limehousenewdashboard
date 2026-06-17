@@ -716,7 +716,7 @@ const VarA = (function() {
           fontSize: 11, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase',
           color: '#9aa595', margin: '4px 0 14px',
         }}>
-          {data.quarterLabel} \u00b7 as of {data.asOf}
+          {data.quarterLabel} · as of {data.asOf}
         </div>
 
         {/* Role selector */}
@@ -786,7 +786,7 @@ const VarA = (function() {
           marginTop: 28, paddingTop: 16, borderTop: '1px solid #e5e8e2',
           fontSize: 10, color: '#9aa595', textAlign: 'center',
         }}>
-          Limehouse PM \u00b7 Team Performance \u00b7 {data.quarterLabel}
+          Limehouse PM · Team Performance · {data.quarterLabel}
         </div>
       </div>
     );
