@@ -611,7 +611,27 @@ const VarA = (function() {
 
   function TeamPerformanceView({ mobile, setDrillKey }) {
     const [selectedRole, setSelectedRole] = useState(TEAM?.roles?.[0]?.id || 'pm');
+    const [pw, setPw] = useState('');
+    const [unlocked, setUnlocked] = useState(() => sessionStorage.getItem('limehouse_ceo') === '1');
+    const [err, setErr] = useState(false);
     const data = TEAM;
+
+    if (!unlocked) {
+      return (
+        <div style={{ minHeight: 480, display:'flex', alignItems:'center', justifyContent:'center' }}>
+          <form onSubmit={(e) => { e.preventDefault(); if (pw === 'LimehouseRTCS') { sessionStorage.setItem('limehouse_ceo','1'); setUnlocked(true); } else { setErr(true); } }}
+            style={{ background:'#fff', border:'1px solid #e5e8e2', borderRadius:8, padding:'28px 32px', width: mobile?280:340, boxShadow:'0 4px 18px rgba(0,0,0,0.04)' }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595', marginBottom:6 }}>Team Performance</div>
+            <div style={{ fontSize:15, color:'#1c2119', marginBottom:18, fontWeight:500 }}>Enter password to continue</div>
+            <input type="password" value={pw} onChange={(e) => { setPw(e.target.value); setErr(false); }}
+              autoFocus placeholder="Password"
+              style={{ width:'100%', padding:'10px 12px', fontSize:13, border: err ? '1px solid #c0392b' : '1px solid #cbd1c4', borderRadius:6, fontFamily:'inherit', boxSizing:'border-box', outline:'none' }} />
+            {err && <div style={{ color:'#c0392b', fontSize:11, marginTop:6 }}>Incorrect password.</div>}
+            <button type="submit" style={{ marginTop:14, width:'100%', padding:'10px 12px', background:'#1c2119', color:'#fff', border:'none', borderRadius:6, fontSize:13, fontWeight:500, cursor:'pointer', fontFamily:'inherit' }}>Unlock</button>
+          </form>
+        </div>
+      );
+    }
 
     if (!data || !data.roles) {
       return (
@@ -655,13 +675,6 @@ const VarA = (function() {
                 opacity: r.placeholder ? 0.5 : 1,
               }}>
                 {r.name}
-                {!r.placeholder && r.bonus && r.kpiResults?.length > 0 && (
-                  <span style={{
-                    marginLeft: 6, fontSize: 10, opacity: 0.8,
-                  }}>
-                    ${r.bonus.total}
-                  </span>
-                )}
               </button>
             );
           })}
