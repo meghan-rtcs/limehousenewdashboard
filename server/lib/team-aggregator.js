@@ -30,11 +30,11 @@ function extractValues(dashboard, lsKpis) {
     // ── Portfolio Manager ──
     occupancyRate: dashboard?.occupancy?.rate?.value ?? null,
     renewalRate: lsVal("PM", "Lease Renewal Rate"),
-    daysOnMarket: dashboard?.leasing?.dom?.value ?? null,
-    delinquencyRate: dashboard?.healthCounts?.delinquencyPct?.value ?? null,
+    daysOnMarket: dashboard?.marketing?.avgDaysOnMarket?.value ?? null,
+    delinquencyRate: extractFromRoleKpis(dashboard?.roleKpis, "PM", "Delinquency Rate"),
 
     // ── Portfolio Assistant ──
-    showingCompletionRate: dashboard?.leasing?.showingCompletion?.value ?? null,
+    showingCompletionRate: extractFromRoleKpis(dashboard?.roleKpis, "APM", "Showing Completion Rate"),
     propertyReadinessRate: lsVal("APM", "Property Readiness"),
     paResidentResponseHours: lsVal("APM", "Resident Response Time"),
 
@@ -53,7 +53,6 @@ function extractValues(dashboard, lsKpis) {
     aaTaskCompletionRate: lsVal("AA", "Task Completion Rate"),
     aaWorkflowComplianceRate: lsVal("AA", "Workflow Compliance"),
     aaLeasingResponseHours: lsVal("AA", "Resident Response Time"),
-    aaAppAccuracyPct: null, // Requires manual audit; not auto-calculable yet
   };
 }
 

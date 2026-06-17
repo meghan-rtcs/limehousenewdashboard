@@ -246,16 +246,6 @@ export const BONUS_ROLES = [
         dataKey: "aaLeasingResponseHours",
         drillKey: "lsResidentResponseAA",
       },
-      {
-        id: "aa_app_accuracy",
-        name: "Application Completion Accuracy",
-        definition: "Applications fully complete before PM review",
-        target: 100,
-        direction: "gte",
-        format: "pct",
-        sources: ["Buildium", "SharePoint"],
-        dataKey: "aaAppAccuracyPct",
-      },
     ],
   },
 ];
