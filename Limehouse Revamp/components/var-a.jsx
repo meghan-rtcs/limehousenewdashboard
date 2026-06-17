@@ -652,8 +652,8 @@ const VarA = (function() {
 
         {/* Score legend */}
         <div style={{
-          display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 10,
-          fontSize: 10, color: '#6b7566',
+          display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 12,
+          fontSize: 12, color: '#6b7566',
         }}>
           {[
             { tier: 'green', text: `Best (3) = met target \u2192 $${bonus.slotValue}` },
@@ -661,8 +661,8 @@ const VarA = (function() {
             { tier: 'coral', text: `Good (1) = within 20% \u2192 $${Math.round(bonus.slotValue / 3)}` },
             { tier: 'red',   text: 'Red (0) = missed >20% \u2192 $0' },
           ].map(l => (
-            <span key={l.tier} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: TIER_COLORS[l.tier].fg }} />
+            <span key={l.tier} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 9, height: 9, borderRadius: '50%', background: TIER_COLORS[l.tier].fg }} />
               {l.text}
             </span>
           ))}
@@ -716,7 +716,7 @@ const VarA = (function() {
           fontSize: 11, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase',
           color: '#9aa595', margin: '4px 0 14px',
         }}>
-          Team performance \u00b7 {data.quarterLabel} \u00b7 as of {data.asOf}
+          {data.quarterLabel} \u00b7 as of {data.asOf}
         </div>
 
         {/* Role selector */}
