@@ -186,6 +186,20 @@ function migrate(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_property_snapshots_date ON property_snapshots(snapshot_date);
 
+    -- Team performance quarterly snapshots. One row per (year, quarter),
+    -- upserted on every refresh. The current quarter's row updates live as
+    -- data changes; once the calendar rolls into the next quarter the old row
+    -- is never touched again, freezing it as that quarter's final standing.
+    -- payload is a compact JSON blob of per-role scorePct/bonus and per-KPI
+    -- actual/score/tier, used to chart quarter-over-quarter trend.
+    CREATE TABLE IF NOT EXISTS team_perf_snapshots (
+      year INTEGER NOT NULL,
+      quarter INTEGER NOT NULL,
+      captured_at TEXT,
+      payload TEXT,
+      PRIMARY KEY (year, quarter)
+    );
+
     -- Sync log
     CREATE TABLE IF NOT EXISTS sync_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

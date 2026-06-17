@@ -4,6 +4,7 @@
 // the payload for the Team Performance tab.
 
 import { BONUS_ROLES, scoreKpi, calculateBonus } from "./bonus-config.js";
+import { run, query } from "./db.js";
 
 // ── Value extraction ────────────────────────────────────────────────────────
 // Maps each dataKey to a function that extracts the value from the
@@ -117,11 +118,90 @@ export function buildTeamPerformance(dashboard, lsKpis) {
     };
   });
 
+  // Persist this quarter's standing (idempotent upsert) and build the
+  // quarter-over-quarter trend across every recorded quarter.
+  try { recordTeamSnapshot(year, quarter, now, roles); }
+  catch (e) { console.error("[team] snapshot record failed:", e.message); }
+
+  let trend = null;
+  try { trend = buildTeamTrend(); }
+  catch (e) { console.error("[team] trend build failed:", e.message); }
+
   return {
     quarter: `Q${quarter}`,
     year,
     quarterLabel: `Q${quarter} ${year}`,
     asOf: now.toISOString().slice(0, 10),
     roles,
+    trend,
   };
+}
+
+// ── Quarterly snapshot persistence ───────────────────────────────────────────
+// Stores a compact JSON blob of the current standing under (year, quarter).
+// Upsert: the live current quarter overwrites its own row on each refresh;
+// past quarters are never re-touched, so they freeze at their final value.
+function recordTeamSnapshot(year, quarter, now, roles) {
+  const snapshot = {
+    asOf: now.toISOString().slice(0, 10),
+    roles: roles.map(r => ({
+      id: r.id,
+      scorePct: r.scorePct,
+      bonusTotal: r.bonus?.total ?? 0,
+      bonusMax: r.bonus?.max ?? 0,
+      kpis: (r.kpiResults || []).map(k => ({
+        id: k.id,
+        actual: k.actual,
+        score: k.score,
+        tier: k.tier,
+      })),
+    })),
+  };
+  run(
+    `INSERT INTO team_perf_snapshots (year, quarter, captured_at, payload)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(year, quarter)
+     DO UPDATE SET captured_at = excluded.captured_at, payload = excluded.payload`,
+    [year, quarter, now.toISOString(), JSON.stringify(snapshot)]
+  );
+}
+
+// ── Trend builder ─────────────────────────────────────────────────────────────
+// Reads every stored quarter (chronological) and produces, per role:
+//   scorePct[], bonusTotal[], bonusMax[]  (one entry per quarter)
+// and per KPI: { actuals[], scores[], tiers[] }.
+// Returns null when nothing has been recorded yet.
+function buildTeamTrend() {
+  const rows = query(
+    "SELECT year, quarter, payload FROM team_perf_snapshots ORDER BY year ASC, quarter ASC"
+  );
+  if (!rows.length) return null;
+
+  const quarters = rows.map(r => `Q${r.quarter} ${r.year}`);
+  const parsed = rows.map(r => {
+    try { return JSON.parse(r.payload); } catch { return { roles: [] }; }
+  });
+  const roleAt = (p, roleId) => (p.roles || []).find(x => x.id === roleId) || null;
+
+  const rolesOut = {};
+  for (const role of BONUS_ROLES) {
+    const series = parsed.map(p => roleAt(p, role.id));
+    const kpis = {};
+    for (const kpi of role.kpis || []) {
+      const kAt = (rr) => rr && rr.kpis ? rr.kpis.find(k => k.id === kpi.id) || null : null;
+      kpis[kpi.id] = {
+        actuals: series.map(rr => { const k = kAt(rr); return k ? k.actual : null; }),
+        scores: series.map(rr => { const k = kAt(rr); return k ? k.score : null; }),
+        tiers: series.map(rr => { const k = kAt(rr); return k ? k.tier : null; }),
+      };
+    }
+    rolesOut[role.id] = {
+      scorePct: series.map(rr => rr ? rr.scorePct : null),
+      bonusTotal: series.map(rr => rr ? rr.bonusTotal : null),
+      bonusMax: series.map(rr => rr ? rr.bonusMax : null),
+      kpis,
+    };
+  }
+
+  return { quarters, roles: rolesOut };
 }

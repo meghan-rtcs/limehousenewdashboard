@@ -5,3 +5,4 @@
 - [Frontend JSX bundling](frontend-jsx-bundling.md) — .jsx is compiled server-side once and cached, served at /app-bundle.js; production React, no browser Babel; JSX edits need a restart.
 - [Lease Renewal Rate semantics](leadsimple-renewal-rate.md) — renewed = completed "Lease Renewed" (positive check); denominator = decided only (exclude in-progress Send Lease/Upcoming).
 - [Dashboard location labels](dashboard-location-labels.md) — drilldowns show addresses not IDs; Buildium=propName+unit_number, RentEngine=address.formatted_address (no unit_number field).
+- [Team performance trend](team-performance-trend.md) — team KPIs are live/no history; trending requires per-quarter snapshot upsert (current quarter live, past frozen), accrues over time — never backfill fake quarters.

@@ -454,7 +454,7 @@ const VarA = (function() {
     return `${p}${kpi.target}`;
   }
 
-  function TeamKpiRow({ kpi, slot, mobile, setDrillKey }) {
+  function TeamKpiRow({ kpi, slot, mobile, setDrillKey, kpiTrend, quarters }) {
     const [hover, setHover] = useState(false);
     const tier = TIER_COLORS[kpi.tier] || TIER_COLORS.gray;
     const actualColor = kpi.tier === 'green' ? '#639922'
@@ -489,6 +489,16 @@ const VarA = (function() {
               return <span key={s} style={{ background: st.bg, color: st.fg, fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 3, letterSpacing: '0.03em' }}>{s === 'RentEngine' ? 'RE' : s === 'LeadSimple' ? 'LS' : s === 'Buildium' ? 'BD' : s}</span>;
             })}
           </div>
+          {/* Per-KPI quarter trend dots (shown once 2+ quarters exist) */}
+          {kpiTrend && quarters && quarters.length >= 2 && (
+            <div style={{ display: 'flex', gap: 3, marginTop: 6, alignItems: 'center' }}>
+              {quarters.map((q, i) => {
+                const t = kpiTrend.tiers?.[i];
+                const c = t ? (TIER_COLORS[t]?.fg || '#cbd1c4') : '#e5e8e2';
+                return <span key={q} title={`${q}: ${t || 'no data'}`} style={{ width: 6, height: 6, borderRadius: '50%', background: c }} />;
+              })}
+            </div>
+          )}
         </div>
 
         {/* Target (hidden on mobile - combined with actual) */}
@@ -526,7 +536,47 @@ const VarA = (function() {
     );
   }
 
-  function TeamRolePanel({ role, mobile, setDrillKey }) {
+  function TeamTrendCard({ roleTrend, quarters, mobile }) {
+    if (!roleTrend || !quarters || !quarters.length) return null;
+    const scorePct = roleTrend.scorePct || [];
+    const bonusTotal = roleTrend.bonusTotal || [];
+    const shortQ = (q) => { const parts = String(q).split(' '); return parts.length === 2 ? `${parts[0]} \u2019${parts[1].slice(2)}` : q; };
+    const single = quarters.length < 2;
+    return (
+      <div style={{
+        background: '#fff', border: '1px solid #e5e8e2', borderRadius: 8,
+        padding: mobile ? 12 : 16, marginBottom: 10,
+      }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#9aa595', marginBottom: 14 }}>
+          Quarterly trend
+        </div>
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: mobile ? 8 : 16, overflowX: 'auto', paddingBottom: 2 }}>
+          {quarters.map((q, i) => {
+            const pct = scorePct[i];
+            const h = pct != null ? Math.max(4, Math.round((pct / 100) * 88)) : 0;
+            const color = pct == null ? '#e5e8e2' : pct >= 80 ? '#3d8c1f' : pct >= 50 ? '#d68910' : '#c0392b';
+            return (
+              <div key={q} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, flex: '0 0 auto', minWidth: mobile ? 46 : 58 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: pct != null ? '#1c2119' : '#cbd1c4' }}>{pct != null ? `${pct}%` : '\u2014'}</div>
+                <div style={{ width: mobile ? 28 : 36, height: 88, background: '#f3f4f0', borderRadius: 4, display: 'flex', alignItems: 'flex-end', overflow: 'hidden' }}>
+                  <div style={{ width: '100%', height: h, background: color, borderRadius: 4, transition: 'height .3s' }} />
+                </div>
+                <div style={{ fontSize: 10, color: '#6b7566', fontWeight: 600 }}>{shortQ(q)}</div>
+                <div style={{ fontSize: 10, color: '#9aa595' }}>${(bonusTotal[i] || 0).toLocaleString()}</div>
+              </div>
+            );
+          })}
+        </div>
+        {single && (
+          <div style={{ fontSize: 10.5, color: '#9aa595', marginTop: 12, fontStyle: 'italic' }}>
+            Trend builds as each quarter is captured \u2014 next quarter will appear here so you can compare progress over time.
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function TeamRolePanel({ role, mobile, setDrillKey, roleTrend, quarters }) {
     const bonus = role.bonus;
     const hasKpis = role.kpiResults && role.kpiResults.length > 0;
     const isPlaceholder = role.placeholder || (!hasKpis && role.maxBonus === 0);
@@ -566,7 +616,7 @@ const VarA = (function() {
           {/* KPI rows */}
           {role.kpiResults.map((kpi, i) => (
             <div key={kpi.id} style={{ borderBottom: i < role.kpiResults.length - 1 ? '1px solid #f3f4f0' : 'none' }}>
-              <TeamKpiRow kpi={kpi} slot={bonus.slots[i]} mobile={mobile} setDrillKey={setDrillKey} />
+              <TeamKpiRow kpi={kpi} slot={bonus.slots[i]} mobile={mobile} setDrillKey={setDrillKey} kpiTrend={roleTrend?.kpis?.[kpi.id]} quarters={quarters} />
             </div>
           ))}
         </div>
@@ -725,8 +775,11 @@ const VarA = (function() {
           )}
         </div>
 
+        {/* Quarterly trend */}
+        {!role.placeholder && <TeamTrendCard roleTrend={data.trend?.roles?.[role.id]} quarters={data.trend?.quarters} mobile={mobile} />}
+
         {/* Role panel */}
-        <TeamRolePanel role={role} mobile={mobile} setDrillKey={setDrillKey} />
+        <TeamRolePanel role={role} mobile={mobile} setDrillKey={setDrillKey} roleTrend={data.trend?.roles?.[role.id]} quarters={data.trend?.quarters} />
 
         {/* Footer */}
         <div style={{
