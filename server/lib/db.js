@@ -200,6 +200,16 @@ function migrate(db) {
       PRIMARY KEY (year, quarter)
     );
 
+    -- Generic key/value cache. Used to persist the last fully-built dashboard
+    -- payload so a cold start (deploy / idle wake) can serve the previous
+    -- snapshot instantly while a fresh build runs in the background, instead
+    -- of blocking the first request on a ~80s live rebuild.
+    CREATE TABLE IF NOT EXISTS app_cache (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT
+    );
+
     -- Sync log
     CREATE TABLE IF NOT EXISTS sync_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

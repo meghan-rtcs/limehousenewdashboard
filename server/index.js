@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
-import { getDb, query as dbQuery } from "./lib/db.js";
+import { getDb, query as dbQuery, run as dbRun, queryOne as dbQueryOne } from "./lib/db.js";
 import { syncAll, testGL } from "./lib/sync.js";
 import { buildDashboard } from "./lib/aggregator.js";
 import { startScheduler, runSync, runLeadSimpleSync, setPostSyncHook } from "./lib/scheduler.js";
@@ -43,6 +43,7 @@ async function refreshDashboard() {
       rebuildPending = false;
       cachedPayload = await buildDashboard();
       cachedAt = Date.now();
+      persistDashboard(cachedPayload, cachedAt);
       console.log(`[server] Dashboard built at ${new Date(cachedAt).toISOString()}`);
     } while (rebuildPending);
   } catch (err) {
@@ -50,6 +51,39 @@ async function refreshDashboard() {
   } finally {
     building = false;
   }
+}
+
+// Persist the freshly-built payload so the next cold start can serve it
+// immediately. Best-effort: a persistence failure must never break a build.
+function persistDashboard(payload, builtAt) {
+  try {
+    dbRun(
+      `INSERT INTO app_cache (key, value, updated_at) VALUES ('dashboard', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [JSON.stringify({ payload, builtAt }), new Date(builtAt).toISOString()]
+    );
+  } catch (e) {
+    console.error("[server] persist dashboard failed:", e.message);
+  }
+}
+
+// Load the last persisted payload into memory so /api/dashboard answers
+// instantly on startup. Returns true if a snapshot was loaded.
+function loadPersistedDashboard() {
+  try {
+    const row = dbQueryOne("SELECT value FROM app_cache WHERE key = 'dashboard'");
+    if (!row?.value) return false;
+    const parsed = JSON.parse(row.value);
+    if (parsed?.payload) {
+      cachedPayload = parsed.payload;
+      cachedAt = parsed.builtAt || Date.now();
+      console.log(`[server] Loaded persisted dashboard from ${new Date(cachedAt).toISOString()}`);
+      return true;
+    }
+  } catch (e) {
+    console.error("[server] load persisted dashboard failed:", e.message);
+  }
+  return false;
 }
 
 // Let scheduled syncs (Buildium + overnight LeadSimple) rebuild the served
@@ -312,15 +346,22 @@ app.listen(PORT, "0.0.0.0", async () => {
   // Start the cron scheduler
   startScheduler();
 
-  // Initial sync + dashboard build
-  console.log("[server] Starting initial sync...");
-  try {
-    await syncAll("full");
-    await refreshDashboard();
-    console.log("[server] Initial sync and dashboard build complete");
-  } catch (err) {
-    console.error("[server] Initial sync failed:", err.message);
-    // Try to build dashboard from whatever data is in DB
-    try { await refreshDashboard(); } catch (e) { /* ignore */ }
-  }
+  // Serve the last-known dashboard immediately so the first page load is
+  // near-instant, then refresh from live sources in the background. Building
+  // the dashboard makes hundreds of live API calls (~80s), so we never block
+  // startup or the first request on it when we already have a prior snapshot.
+  const haveSnapshot = loadPersistedDashboard();
+
+  (async () => {
+    console.log(`[server] Starting initial sync in background${haveSnapshot ? " (serving cached snapshot meanwhile)" : ""}...`);
+    try {
+      await syncAll("full");
+      await refreshDashboard();
+      console.log("[server] Initial sync and dashboard build complete");
+    } catch (err) {
+      console.error("[server] Initial sync failed:", err.message);
+      // Try to build dashboard from whatever data is in DB
+      try { await refreshDashboard(); } catch (e) { /* ignore */ }
+    }
+  })();
 });

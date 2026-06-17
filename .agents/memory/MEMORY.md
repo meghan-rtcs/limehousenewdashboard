@@ -6,3 +6,4 @@
 - [Lease Renewal Rate semantics](leadsimple-renewal-rate.md) — renewed = completed "Lease Renewed" (positive check); denominator = decided only (exclude in-progress Send Lease/Upcoming).
 - [Dashboard location labels](dashboard-location-labels.md) — drilldowns show addresses not IDs; Buildium=propName+unit_number, RentEngine=address.formatted_address (no unit_number field).
 - [Team performance trend](team-performance-trend.md) — team KPIs are live/no history; trending requires per-quarter snapshot upsert (current quarter live, past frozen), accrues over time — never backfill fake quarters.
+- [Dashboard cold-start persistence](dashboard-cold-start.md) — buildDashboard() is slow (hundreds of live API calls + RE 429s); persist last payload to app_cache and serve it instantly on startup, rebuild in background.
