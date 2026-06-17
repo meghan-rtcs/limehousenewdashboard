@@ -1,5 +1,6 @@
 import { query, queryOne } from "./db.js";
 import { buildLeadSimpleKpis } from "./ls-aggregator.js";
+import { buildTeamPerformance } from "./team-aggregator.js";
 import { rentengine } from "./rentengine.js";
 import { buildium } from "./buildium.js";
 
@@ -961,8 +962,16 @@ export async function buildDashboard() {
     console.warn("[agg] LeadSimple KPIs failed:", err.message);
   }
 
+  // Team Performance (bonus calculator)
+  let teamPerformance = null;
+  try {
+    teamPerformance = buildTeamPerformance({ ...dashboard, lsKpis, lsSummary }, lsKpis);
+  } catch (err) {
+    console.warn("[agg] Team Performance failed:", err.message);
+  }
+
   return {
-    dashboard: { ...dashboard, lsKpis, lsSummary },
+    dashboard: { ...dashboard, lsKpis, lsSummary, teamPerformance },
     drilldowns: { ...drilldowns, ...lsDrilldowns },
   };
 }

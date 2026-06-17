@@ -1,0 +1,165 @@
+I'm replacing the "LeadSimple" tab with a new "Team Performance" tab that shows per-role KPIs with Good/Better/Best scoring and a quarterly bonus calculator. Here's everything you need to do:
+
+## New files to create:
+
+### 1. Create `server/lib/bonus-config.js`
+Copy the contents of the `bonus-config.js` file I've added to the project root (or the `team-perf/server/lib/` folder). This defines all roles, their KPIs, bonus caps, and the scoring engine.
+
+### 2. Create `server/lib/team-aggregator.js`  
+Copy the contents of the `team-aggregator.js` file I've added. This merges Buildium/RentEngine KPI values from the main aggregator with LeadSimple KPI values, applies scoring, and calculates bonus payouts per role.
+
+## Changes to existing files:
+
+### 3. server/lib/aggregator.js
+
+Find where `buildLeadSimpleKpis` is imported and the LS data is merged into the return. Update it to also build team performance data.
+
+Find:
+```js
+import { buildLeadSimpleKpis } from "./ls-aggregator.js";
+```
+
+Replace with:
+```js
+import { buildLeadSimpleKpis } from "./ls-aggregator.js";
+import { buildTeamPerformance } from "./team-aggregator.js";
+```
+
+Then find the return block at the end where lsKpis is assembled. It currently looks something like:
+```js
+  let lsKpis = null, lsDrilldowns = {}, lsSummary = null;
+  try {
+    const ls = buildLeadSimpleKpis();
+    lsKpis = ls.lsKpis;
+    lsDrilldowns = ls.lsDrilldowns;
+    lsSummary = ls.lsSummary;
+  } catch (err) {
+    console.warn("[agg] LeadSimple KPIs failed:", err.message);
+  }
+
+  return {
+    dashboard: { ...dashboard, lsKpis, lsSummary },
+    drilldowns: { ...drilldowns, ...lsDrilldowns },
+  };
+```
+
+Replace with:
+```js
+  let lsKpis = null, lsDrilldowns = {}, lsSummary = null;
+  try {
+    const ls = buildLeadSimpleKpis();
+    lsKpis = ls.lsKpis;
+    lsDrilldowns = ls.lsDrilldowns;
+    lsSummary = ls.lsSummary;
+  } catch (err) {
+    console.warn("[agg] LeadSimple KPIs failed:", err.message);
+  }
+
+  // Team Performance (bonus calculator)
+  let teamPerformance = null;
+  try {
+    teamPerformance = buildTeamPerformance({ ...dashboard, lsKpis, lsSummary }, lsKpis);
+  } catch (err) {
+    console.warn("[agg] Team Performance failed:", err.message);
+  }
+
+  return {
+    dashboard: { ...dashboard, lsKpis, lsSummary, teamPerformance },
+    drilldowns: { ...drilldowns, ...lsDrilldowns },
+  };
+```
+
+### 4. Limehouse Dashboard - A.html
+
+Find:
+```js
+    window.LIMEHOUSE_DATA = payload.dashboard;
+    window.LIMEHOUSE_DRILLDOWNS = payload.drilldowns;
+    window.LIMEHOUSE_SYNC = payload.sync;
+    window.LIMEHOUSE_LS_KPIS = payload.dashboard.lsKpis;
+    window.LIMEHOUSE_LS_SUMMARY = payload.dashboard.lsSummary;
+```
+
+Replace with:
+```js
+    window.LIMEHOUSE_DATA = payload.dashboard;
+    window.LIMEHOUSE_DRILLDOWNS = payload.drilldowns;
+    window.LIMEHOUSE_SYNC = payload.sync;
+    window.LIMEHOUSE_LS_KPIS = payload.dashboard.lsKpis;
+    window.LIMEHOUSE_LS_SUMMARY = payload.dashboard.lsSummary;
+    window.LIMEHOUSE_TEAM = payload.dashboard.teamPerformance;
+```
+
+### 5. Limehouse Revamp/components/var-a.jsx
+
+This is the biggest change. We're REPLACING the LeadSimple tab entirely with the Team Performance tab.
+
+**5a.** Find the LS data references near the top:
+```js
+  const LS_KPIS = window.LIMEHOUSE_LS_KPIS;
+  const LS_SUMMARY = window.LIMEHOUSE_LS_SUMMARY;
+```
+
+Replace with:
+```js
+  const LS_KPIS = window.LIMEHOUSE_LS_KPIS;
+  const LS_SUMMARY = window.LIMEHOUSE_LS_SUMMARY;
+  const TEAM = window.LIMEHOUSE_TEAM;
+```
+
+**5b.** DELETE the entire LeadSimple View section. Remove everything from this comment:
+```js
+  // ── LeadSimple View ──────────────────────────────────────────────────
+```
+All the way through to just before:
+```js
+  function CeoView({ mobile, SD, showSource, setDrillKey, k }) {
+```
+
+This includes: all the `LS_SOURCE_STYLE`, `lsRagForKpi`, `lsRoleStatus`, `LS_RAG_COLOR`, `LS_RAG_BG`, `LS_RAG_LABEL`, `LsRoleCard`, and `LeadSimpleView` functions/constants.
+
+**5c.** In the SAME location where you deleted the LeadSimple code (right before CeoView), paste the ENTIRE contents of the `TEAM-PERFORMANCE-TAB.jsx` file.
+
+**5d.** Update the tab nav. Find:
+```js
+          {[{id:'dashboard',label:'Dashboard'},{id:'leadsimple',label:'LeadSimple'},{id:'ceo',label:'CEO View'}].map(t => (
+```
+
+Replace with:
+```js
+          {[{id:'dashboard',label:'Dashboard'},{id:'team',label:'Team Performance'},{id:'ceo',label:'CEO View'}].map(t => (
+```
+
+**5e.** Update the tab routing. Find:
+```js
+        {tab === 'ceo' ? <CeoView mobile={mobile} SD={SD} showSource={showSource} setDrillKey={setDrillKey} k={k} />
+         : tab === 'leadsimple' ? <LeadSimpleView mobile={mobile} setDrillKey={setDrillKey} />
+         : (<>
+```
+
+Replace with:
+```js
+        {tab === 'ceo' ? <CeoView mobile={mobile} SD={SD} showSource={showSource} setDrillKey={setDrillKey} k={k} />
+         : tab === 'team' ? <TeamPerformanceView mobile={mobile} setDrillKey={setDrillKey} />
+         : (<>
+```
+
+## Summary of what this does:
+
+- Removes the "LeadSimple" tab entirely
+- Adds a "Team Performance" tab between Dashboard and CEO View
+- The new tab has a role selector (6 roles: PM, PA, BK, LS, MK, AA)
+- Each role shows its accountability KPIs in a scored table with:
+  - KPI name with source badges (BD, RE, LS)
+  - Target vs Actual values
+  - Good/Better/Best score (0-3)
+  - Dollar payout per KPI
+- A bonus calculator bar shows the total quarterly bonus estimate
+- Marketing Specialist shows as a placeholder (hire pending, no KPIs yet)
+- The scoring engine auto-calculates: Best (3) = met target, Better (2) = within 10%, Good (1) = within 20%, Red (0) = missed by >20%
+
+## Important:
+- Do NOT modify the CeoView or its Performance by Role section. It stays as-is for now.
+- Do NOT modify the main dashboard tab.
+- The LeadSimple sync and LS aggregator stay — the Team Performance aggregator reads FROM them. Don't remove ls-sync.js or ls-aggregator.js.
+- After making changes, restart the server and run a sync to populate the data.

@@ -1,0 +1,287 @@
+// ── Bonus configuration ─────────────────────────────────────────────────────
+// Source of truth for roles, their accountability KPIs, bonus caps,
+// and Good/Better/Best scoring thresholds.
+//
+// SCORING:
+//   Best (3)   = met or exceeded target        → full slot value
+//   Better (2) = within 10% of target          → 2/3 slot value
+//   Good (1)   = within 20% of target          → 1/3 slot value
+//   Red (0)    = missed by >20%                → $0
+//
+// Slot value = maxBonus / number of accountability KPIs
+// Quarterly payout = sum of all slot payouts
+
+export const BONUS_ROLES = [
+  {
+    id: "pm",
+    name: "Portfolio Manager",
+    abbrev: "PM",
+    maxBonus: 1000,
+    kpis: [
+      {
+        id: "pm_occupancy",
+        name: "Portfolio Occupancy Rate",
+        definition: "% of occupied units",
+        target: 95,
+        direction: "gte",       // gte = higher is better, lte = lower is better
+        format: "pct",
+        sources: ["Buildium"],
+        dataKey: "occupancyRate",  // key in the aggregator data
+      },
+      {
+        id: "pm_renewal",
+        name: "Lease Renewal Rate",
+        definition: "% of expiring leases renewed within target window",
+        target: 70,
+        direction: "gte",
+        format: "pct",
+        sources: ["Buildium", "LeadSimple"],
+        dataKey: "renewalRate",
+      },
+      {
+        id: "pm_dom",
+        name: "Days on Market",
+        definition: "Weighted avg. days from listing to lease execution",
+        target: 21,
+        direction: "lte",
+        format: "days",
+        sources: ["RentEngine", "Buildium"],
+        dataKey: "daysOnMarket",
+      },
+      {
+        id: "pm_delinquency",
+        name: "Delinquency Rate",
+        definition: "Current-month delinquency as % of rent roll (by 30th)",
+        target: 3,
+        direction: "lte",
+        format: "pct",
+        sources: ["Buildium"],
+        dataKey: "delinquencyRate",
+      },
+    ],
+  },
+  {
+    id: "pa",
+    name: "Portfolio Assistant",
+    abbrev: "PA",
+    maxBonus: 750,
+    kpis: [
+      {
+        id: "pa_showing",
+        name: "Showing Completion Rate",
+        definition: "% of scheduled showings completed (excl. prospect cancellations)",
+        target: 95,
+        direction: "gte",
+        format: "pct",
+        sources: ["RentEngine"],
+        dataKey: "showingCompletionRate",
+      },
+      {
+        id: "pa_readiness",
+        name: "Property Readiness",
+        definition: "Properties ready for move-in by scheduled date",
+        target: 100,
+        direction: "gte",
+        format: "pct",
+        sources: ["LeadSimple", "Buildium"],
+        dataKey: "propertyReadinessRate",
+      },
+      {
+        id: "pa_response",
+        name: "Resident Response Time",
+        definition: "Response to scheduling/access requests",
+        target: 24,
+        direction: "lte",
+        format: "hours",
+        sources: ["LeadSimple"],
+        dataKey: "paResidentResponseHours",
+      },
+    ],
+  },
+  {
+    id: "bk",
+    name: "Bookkeeper",
+    abbrev: "BK",
+    maxBonus: 500,
+    kpis: [
+      {
+        id: "bk_recon",
+        name: "Reconciliation Accuracy",
+        definition: "Bank and credit card accounts reconciled daily without discrepancies",
+        target: 100,
+        direction: "gte",
+        format: "pct",
+        sources: ["Buildium"],
+        dataKey: "reconAccuracyPct",
+      },
+      {
+        id: "bk_rent",
+        name: "Rent Processing Accuracy",
+        definition: "Rent and deposit transactions processed without errors",
+        target: 100,
+        direction: "gte",
+        format: "pct",
+        sources: ["Buildium"],
+        dataKey: "rentProcessingPct",
+      },
+      {
+        id: "bk_vendor",
+        name: "Vendor Compliance",
+        definition: "W-9 and COI documentation current for all active vendors",
+        target: 100,
+        direction: "gte",
+        format: "pct",
+        sources: ["Buildium"],
+        dataKey: "vendorCompliancePct",
+      },
+      {
+        id: "bk_1099",
+        name: "1099 Compliance",
+        definition: "1099s prepared and distributed by end of January",
+        target: 100,
+        direction: "gte",
+        format: "pct",
+        sources: ["Buildium"],
+        dataKey: "vendor1099Pct",
+      },
+    ],
+  },
+  {
+    id: "ls",
+    name: "Leasing Specialist",
+    abbrev: "LS",
+    maxBonus: 500,
+    kpis: [
+      {
+        id: "ls_applicant",
+        name: "Applicant Response Timeliness",
+        definition: "Applicants contacted/updated after application submission",
+        target: 95,
+        direction: "gte",
+        format: "pct",
+        sources: ["LeadSimple", "RentEngine"],
+        dataKey: "applicantResponseRate",
+      },
+      {
+        id: "ls_processing",
+        name: "Application Processing Time",
+        definition: "Time from completed app to decision-ready handoff to PM",
+        target: 48,
+        direction: "lte",
+        format: "hours",
+        sources: ["LeadSimple"],
+        dataKey: "appProcessingAvgHours",
+      },
+      {
+        id: "ls_renewal",
+        name: "Renewal Follow-Up Timeliness",
+        definition: "Renewal comms and status updates within workflow timelines",
+        target: 95,
+        direction: "gte",
+        format: "pct",
+        sources: ["LeadSimple"],
+        dataKey: "renewalFollowUpRate",
+      },
+    ],
+  },
+  {
+    id: "mk",
+    name: "Marketing Specialist",
+    abbrev: "MK",
+    maxBonus: 0,  // TBD - hire pending
+    kpis: [],     // no KPIs yet
+    placeholder: true,
+    placeholderNote: "Hire pending. KPIs and bonus will be configured after onboarding.",
+  },
+  {
+    id: "aa",
+    name: "Administrative Assistant",
+    abbrev: "AA",
+    maxBonus: 500,
+    kpis: [
+      {
+        id: "aa_tasks",
+        name: "Task Completion Rate",
+        definition: "% of LeadSimple tasks completed on time",
+        target: 95,
+        direction: "gte",
+        format: "pct",
+        sources: ["LeadSimple"],
+        dataKey: "aaTaskCompletionRate",
+      },
+      {
+        id: "aa_workflow",
+        name: "Workflow Compliance",
+        definition: "Adherence to all assigned workflows",
+        target: 100,
+        direction: "gte",
+        format: "pct",
+        sources: ["LeadSimple"],
+        dataKey: "aaWorkflowComplianceRate",
+      },
+      {
+        id: "aa_leasing_response",
+        name: "Leasing Response Time",
+        definition: "Time to respond to leasing inquiries",
+        target: 24,
+        direction: "lte",
+        format: "hours",
+        sources: ["RentEngine", "LeadSimple"],
+        dataKey: "aaLeasingResponseHours",
+      },
+      {
+        id: "aa_app_accuracy",
+        name: "Application Completion Accuracy",
+        definition: "Applications fully complete before PM review",
+        target: 100,
+        direction: "gte",
+        format: "pct",
+        sources: ["Buildium", "SharePoint"],
+        dataKey: "aaAppAccuracyPct",
+      },
+    ],
+  },
+];
+
+// ── Scoring engine ──────────────────────────────────────────────────────────
+
+export function scoreKpi(kpi, actualValue) {
+  if (actualValue == null) return { score: null, label: "No data", tier: "gray" };
+
+  const { target, direction } = kpi;
+
+  // Calculate how far off target they are as a ratio
+  let ratio;
+  if (direction === "gte") {
+    // Higher is better: 96 vs target 95 → ratio = 96/95 = 1.01
+    ratio = target === 0 ? (actualValue > 0 ? 2 : 1) : actualValue / target;
+  } else {
+    // Lower is better: 18 vs target 21 → ratio = 21/18 = 1.17 (beating target)
+    ratio = actualValue === 0 ? 2 : target / actualValue;
+  }
+
+  // Best: met or exceeded target (ratio >= 1.0)
+  if (ratio >= 1.0) return { score: 3, label: "Best", tier: "green" };
+  // Better: within 10% (ratio >= 0.9)
+  if (ratio >= 0.9) return { score: 2, label: "Better", tier: "amber" };
+  // Good: within 20% (ratio >= 0.8)
+  if (ratio >= 0.8) return { score: 1, label: "Good", tier: "coral" };
+  // Red: missed by >20%
+  return { score: 0, label: "Red", tier: "red" };
+}
+
+export function calculateBonus(role, scores) {
+  const kpiCount = role.kpis.length;
+  if (kpiCount === 0) return { total: 0, max: role.maxBonus, slotValue: 0, slots: [] };
+
+  const slotValue = role.maxBonus / kpiCount;
+  let total = 0;
+  const slots = role.kpis.map((kpi, i) => {
+    const s = scores[i];
+    const payout = s.score != null ? Math.round((s.score / 3) * slotValue) : 0;
+    total += payout;
+    return { kpiId: kpi.id, score: s.score, label: s.label, tier: s.tier, slotValue: Math.round(slotValue), payout };
+  });
+
+  return { total, max: role.maxBonus, slotValue: Math.round(slotValue), slots };
+}
