@@ -27,6 +27,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["Buildium"],
         dataKey: "occupancyRate",  // key in the aggregator data
+        drillKey: "kpiOccupancyRate",
       },
       {
         id: "pm_renewal",
@@ -37,6 +38,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["Buildium", "LeadSimple"],
         dataKey: "renewalRate",
+        drillKey: "lsRenewalRate",
       },
       {
         id: "pm_dom",
@@ -47,6 +49,7 @@ export const BONUS_ROLES = [
         format: "days",
         sources: ["RentEngine", "Buildium"],
         dataKey: "daysOnMarket",
+        drillKey: "avgDaysOnMarket",
       },
       {
         id: "pm_delinquency",
@@ -57,6 +60,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["Buildium"],
         dataKey: "delinquencyRate",
+        drillKey: "kpiDelinquencyRate",
       },
     ],
   },
@@ -75,6 +79,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["RentEngine"],
         dataKey: "showingCompletionRate",
+        drillKey: "kpiShowingCompletion",
       },
       {
         id: "pa_readiness",
@@ -85,6 +90,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["LeadSimple", "Buildium"],
         dataKey: "propertyReadinessRate",
+        drillKey: "lsPropertyReadiness",
       },
       {
         id: "pa_response",
@@ -95,6 +101,7 @@ export const BONUS_ROLES = [
         format: "hours",
         sources: ["LeadSimple"],
         dataKey: "paResidentResponseHours",
+        drillKey: "lsResidentResponseAPM",
       },
     ],
   },
@@ -113,6 +120,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["Buildium"],
         dataKey: "reconAccuracyPct",
+        drillKey: "kpiReconciliation",
       },
       {
         id: "bk_rent",
@@ -123,6 +131,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["Buildium"],
         dataKey: "rentProcessingPct",
+        drillKey: "kpiRentProcessing",
       },
       {
         id: "bk_vendor",
@@ -133,6 +142,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["Buildium"],
         dataKey: "vendorCompliancePct",
+        drillKey: "kpiVendorCompliance",
       },
       {
         id: "bk_1099",
@@ -143,6 +153,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["Buildium"],
         dataKey: "vendor1099Pct",
+        drillKey: "kpi1099Compliance",
       },
     ],
   },
@@ -161,6 +172,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["LeadSimple", "RentEngine"],
         dataKey: "applicantResponseRate",
+        drillKey: "lsApplicantResponse",
       },
       {
         id: "ls_processing",
@@ -171,6 +183,7 @@ export const BONUS_ROLES = [
         format: "hours",
         sources: ["LeadSimple"],
         dataKey: "appProcessingAvgHours",
+        drillKey: "lsAppProcessingTime",
       },
       {
         id: "ls_renewal",
@@ -181,6 +194,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["LeadSimple"],
         dataKey: "renewalFollowUpRate",
+        drillKey: "lsRenewalFollowUp",
       },
     ],
   },
@@ -188,10 +202,10 @@ export const BONUS_ROLES = [
     id: "mk",
     name: "Marketing Specialist",
     abbrev: "MK",
-    maxBonus: 0,  // TBD - hire pending
-    kpis: [],     // no KPIs yet
+    maxBonus: 0,  // hired, but no measurable KPIs defined yet
+    kpis: [],     // no measurable KPIs yet
     placeholder: true,
-    placeholderNote: "Hire pending. KPIs and bonus will be configured after onboarding.",
+    placeholderNote: "Hired \u2014 no measurable KPIs defined yet. Bonus structure to be configured once KPIs are established.",
   },
   {
     id: "aa",
@@ -208,6 +222,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["LeadSimple"],
         dataKey: "aaTaskCompletionRate",
+        drillKey: "lsTaskCompletion",
       },
       {
         id: "aa_workflow",
@@ -218,6 +233,7 @@ export const BONUS_ROLES = [
         format: "pct",
         sources: ["LeadSimple"],
         dataKey: "aaWorkflowComplianceRate",
+        drillKey: "lsWorkflowCompliance",
       },
       {
         id: "aa_leasing_response",
@@ -228,6 +244,7 @@ export const BONUS_ROLES = [
         format: "hours",
         sources: ["RentEngine", "LeadSimple"],
         dataKey: "aaLeasingResponseHours",
+        drillKey: "lsResidentResponseAA",
       },
       {
         id: "aa_app_accuracy",

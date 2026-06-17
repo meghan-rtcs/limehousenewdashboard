@@ -454,23 +454,35 @@ const VarA = (function() {
     return `${p}${kpi.target}`;
   }
 
-  function TeamKpiRow({ kpi, slot, mobile }) {
+  function TeamKpiRow({ kpi, slot, mobile, setDrillKey }) {
+    const [hover, setHover] = useState(false);
     const tier = TIER_COLORS[kpi.tier] || TIER_COLORS.gray;
     const actualColor = kpi.tier === 'green' ? '#639922'
                       : kpi.tier === 'amber' ? '#BA7517'
                       : kpi.tier === 'coral' ? '#D85A30'
                       : kpi.tier === 'red'   ? '#E24B4A'
                       : '#9aa595';
+    const clickable = !!(kpi.drillKey && setDrillKey);
 
     return (
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: mobile ? '1fr 60px 60px' : 'minmax(0,2.5fr) 80px 80px 100px 80px',
-        gap: 1, background: 'transparent',
-      }}>
+      <div
+        onClick={clickable ? () => setDrillKey(kpi.drillKey) : undefined}
+        onMouseEnter={clickable ? () => setHover(true) : undefined}
+        onMouseLeave={clickable ? () => setHover(false) : undefined}
+        title={clickable ? 'View the exact records behind this KPI' : undefined}
+        style={{
+          display: 'grid',
+          gridTemplateColumns: mobile ? '1fr 60px 60px' : 'minmax(0,2.5fr) 80px 80px 100px 80px',
+          gap: 1, background: clickable && hover ? '#f6f7f4' : 'transparent',
+          cursor: clickable ? 'pointer' : 'default',
+          transition: 'background 0.12s',
+        }}>
         {/* KPI name + sources */}
         <div style={{ padding: '10px 12px' }}>
-          <div style={{ fontSize: 12, fontWeight: 500, color: '#1c2119', lineHeight: 1.3 }}>{kpi.name}</div>
+          <div style={{ fontSize: 12, fontWeight: 500, color: clickable && hover ? '#2E4057' : '#1c2119', lineHeight: 1.3 }}>
+            {kpi.name}
+            {clickable && <span style={{ marginLeft: 5, fontSize: 11, color: '#9aa595', fontWeight: 600 }}>{'\u203a'}</span>}
+          </div>
           <div style={{ display: 'flex', gap: 4, marginTop: 3, flexWrap: 'wrap' }}>
             {(kpi.sources || []).map(s => {
               const st = SRC_BADGE[s] || SRC_BADGE.Buildium;
@@ -514,7 +526,7 @@ const VarA = (function() {
     );
   }
 
-  function TeamRolePanel({ role, mobile }) {
+  function TeamRolePanel({ role, mobile, setDrillKey }) {
     const bonus = role.bonus;
     const hasKpis = role.kpiResults && role.kpiResults.length > 0;
     const isPlaceholder = role.placeholder || (!hasKpis && role.maxBonus === 0);
@@ -554,7 +566,7 @@ const VarA = (function() {
           {/* KPI rows */}
           {role.kpiResults.map((kpi, i) => (
             <div key={kpi.id} style={{ borderBottom: i < role.kpiResults.length - 1 ? '1px solid #f3f4f0' : 'none' }}>
-              <TeamKpiRow kpi={kpi} slot={bonus.slots[i]} mobile={mobile} />
+              <TeamKpiRow kpi={kpi} slot={bonus.slots[i]} mobile={mobile} setDrillKey={setDrillKey} />
             </div>
           ))}
         </div>
@@ -714,7 +726,7 @@ const VarA = (function() {
         </div>
 
         {/* Role panel */}
-        <TeamRolePanel role={role} mobile={mobile} />
+        <TeamRolePanel role={role} mobile={mobile} setDrillKey={setDrillKey} />
 
         {/* Footer */}
         <div style={{
