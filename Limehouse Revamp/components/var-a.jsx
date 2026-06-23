@@ -8,52 +8,21 @@ const VarA = (function() {
   const LS_SUMMARY = window.LIMEHOUSE_LS_SUMMARY;
   const TEAM = window.LIMEHOUSE_TEAM;
 
-  // ── Date-range scaling ────────────────────────────────────────────────────
-  // Maps the range selector to (a) a multiplier for cumulative metrics like
-  // "doors added", "renewals YTD", "apps submitted" — these grow with time —
-  // and (b) the slice of monthly arrays the charts should display.
+  // ── Reporting periods ──────────────────────────────────────────────────────
+  // The range selector now picks a server-side reporting window. Changing it
+  // re-fetches /api/dashboard?period=<key>, which recomputes the flow metrics
+  // (income, move-ins, prospects, showings, rent-processing, reconciliation …)
+  // for that exact date window. There is NO client-side proportional scaling —
+  // every number comes straight from the server for the chosen period.
   const RANGES = {
-    '7':   { months: 0.25, label: 'Last 7 days',   sliceTail: 1 },
-    '30':  { months: 1,    label: 'Last 30 days',  sliceTail: 1 },
-    '90':  { months: 3,    label: 'Last 90 days',  sliceTail: 3 },
-    '180': { months: 6,    label: 'Last 6 months', sliceTail: 6 },
-    '365': { months: 12,   label: 'Last 12 months',sliceTail: 12 },
-    'ytd': { months: 4,    label: 'Year to date',  sliceTail: 4 },  // Apr 2026 → 4 months in
+    currentMonth:   { label: 'This month' },
+    lastMonth:      { label: 'Last month' },
+    currentQuarter: { label: 'This quarter' },
+    lastQuarter:    { label: 'Last quarter' },
+    currentYear:    { label: 'This year' },
+    lastYear:       { label: 'Last year' },
   };
-  const cumulativeKeys = new Set([
-    'doorsAdded','doorsLost','netDoors','ownersGained',
-    'renewalsCount','appsSubmitted','moveins',
-    'newProspects','showingsCompleted','totalCalls','totalTexts',
-  ]);
-  function scaleData(range) {
-    const r = RANGES[range] || RANGES['365'];
-    const factor = r.months / 12;
-    const scale = (v) => v > 0 ? Math.max(1, Math.round(v * factor)) : 0;
-    const scaled = JSON.parse(JSON.stringify(D));
-    // Scale cumulative metrics — only on object-shaped sections, NOT arrays
-    Object.keys(scaled).forEach(section => {
-      const sec = scaled[section];
-      if (!sec || typeof sec !== 'object' || Array.isArray(sec)) return;
-      Object.keys(sec).forEach(key => {
-        if (cumulativeKeys.has(key) && sec[key]?.value != null) {
-          sec[key].value    = scale(sec[key].value);
-          sec[key].prevYear = scale(sec[key].prevYear);
-        }
-      });
-    });
-    // Slice monthly arrays to the visible window
-    const tail = r.sliceTail;
-    scaled.rentCollectionByMonth = scaled.rentCollectionByMonth.slice(-Math.max(tail, 1));
-    scaled.doorsMonthly          = scaled.doorsMonthly.slice(-Math.max(tail, 1));
-    scaled.renewalsByMonth       = scaled.renewalsByMonth.slice(-Math.max(tail, 1));
-    if (scaled.incomeMonthly)    scaled.incomeMonthly    = scaled.incomeMonthly.slice(-Math.max(tail, 1));
-    if (scaled.occupancyTrend)   scaled.occupancyTrend   = scaled.occupancyTrend.slice(-Math.max(tail, 1));
-    if (scaled.delinquentTrend)  scaled.delinquentTrend  = scaled.delinquentTrend.slice(-Math.max(tail, 1));
-    Object.keys(scaled.spark).forEach(k => {
-      scaled.spark[k] = scaled.spark[k].slice(-Math.max(tail, 2));
-    });
-    return { data: scaled, range: r };
-  }
+  const DEFAULT_RANGE = 'currentMonth';
 
   // ── Header ────────────────────────────────────────────────────────────────
   function Header({ syncedAt, range, onRangeChange, mobile }) {
@@ -88,12 +57,12 @@ const VarA = (function() {
             backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 4l3 3 3-3' stroke='%236b7566' stroke-width='1.2' fill='none' stroke-linecap='round'/></svg>\")",
             backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center',
           }}>
-            <option value="7">Last 7 days</option>
-            <option value="30">Last 30 days</option>
-            <option value="90">Last 90 days</option>
-            <option value="180">Last 6 months</option>
-            <option value="365">Last 12 months</option>
-            <option value="ytd">Year to date</option>
+            <option value="currentMonth">This month</option>
+            <option value="lastMonth">Last month</option>
+            <option value="currentQuarter">This quarter</option>
+            <option value="lastQuarter">Last quarter</option>
+            <option value="currentYear">This year</option>
+            <option value="lastYear">Last year</option>
           </select>
           <button onClick={async () => {
               if (syncing) return;
@@ -826,21 +795,57 @@ const VarA = (function() {
 
   function Render({ tweaks }) {
     const [drillKey, setDrillKey] = useState(null);
-    const [tab, setTab] = useState('dashboard');
-    const [range, setRange] = useState(tweaks.range || '365');
+    // Persist the active tab + reporting period across reloads so a refresh (or
+    // the post-sync auto-reload) keeps the user where they were.
+    const [tab, setTab] = useState(() => {
+      const saved = sessionStorage.getItem('limehouse_tab');
+      return ['dashboard', 'team', 'ceo'].includes(saved) ? saved : 'dashboard';
+    });
+    const [range, setRange] = useState(() => {
+      const saved = sessionStorage.getItem('limehouse_range');
+      if (saved && RANGES[saved]) return saved;
+      return RANGES[tweaks.range] ? tweaks.range : DEFAULT_RANGE;
+    });
     const mobile = tweaks.viewport === 'phone';
     const showSource = tweaks.sourcePills;
     const yoy = tweaks.yoyMode;
     const dgrid = (cols) => mobile ? 'repeat(2, 1fr)' : `repeat(${cols}, 1fr)`;
 
-    // Recompute scaled data whenever the range changes
-    const { data: SD, range: rangeMeta } = useMemo(() => scaleData(range), [range]);
+    useEffect(() => { sessionStorage.setItem('limehouse_tab', tab); }, [tab]);
+    useEffect(() => { sessionStorage.setItem('limehouse_range', range); }, [range]);
 
-    // Set of drill keys that are backed by real, live API data.
-    // Exclude any metric whose value scales with the date-range dropdown — those
-    // are windowed (not live point-in-time) so the LIVE badge would be misleading.
+    // Per-period payload. The page boots with the default-period data already in
+    // window.LIMEHOUSE_DATA; switching periods re-fetches the server window.
+    const [payload, setPayload] = useState(() => ({
+      data: D,
+      drill: DRILL,
+      period: (D.meta && D.meta.window && D.meta.window.key) || DEFAULT_RANGE,
+    }));
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+      if (range === payload.period) return;
+      let cancelled = false;
+      setLoading(true);
+      fetch('/api/dashboard?period=' + encodeURIComponent(range), { cache: 'no-store' })
+        .then(r => r.json())
+        .then(j => {
+          if (cancelled || !j || !j.dashboard) return;
+          setPayload({ data: j.dashboard, drill: j.drilldowns || DRILL, period: range });
+        })
+        .catch(() => { /* keep showing the previous period on error */ })
+        .finally(() => { if (!cancelled) setLoading(false); });
+      return () => { cancelled = true; };
+    }, [range]);
+
+    const SD = payload.data;
+    const DRILLD = payload.drill;
+    const win = (SD.meta && SD.meta.window) || { label: RANGES[range].label, start: '', end: '' };
+
+    // Set of drill keys backed by real, live API data (windowed flow metrics are
+    // real server-computed numbers, so they qualify too).
     const liveSet = useMemo(
-      () => new Set((SD.meta?.liveMetrics || []).filter(k => !cumulativeKeys.has(k))),
+      () => new Set(SD.meta?.liveMetrics || []),
       [SD]
     );
 
@@ -857,7 +862,7 @@ const VarA = (function() {
 
     const healthColors = { 'Healthy':'#3d8c1f','At-risk':'#d68910','Waitlist':'#7d3c98','On Hold':'#2471a3','Off-Market':'#aab5a3' };
 
-    const drill = drillKey ? DRILL[drillKey] : null;
+    const drill = drillKey ? DRILLD[drillKey] : null;
 
     return (
       <div style={{ background: '#f4f5f3', minHeight: '100%', fontFamily: "'Outfit', sans-serif" }}>
@@ -889,17 +894,18 @@ const VarA = (function() {
           display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
           fontSize: 11.5, color: '#6b7566',
         }}>
-          <span style={{ fontWeight: 600, color: '#1c2119', letterSpacing: '0.04em' }}>{rangeMeta.label.toUpperCase()}</span>
+          <span style={{ fontWeight: 600, color: '#1c2119', letterSpacing: '0.04em' }}>{(win.label || RANGES[range].label).toUpperCase()}</span>
+          {loading && <span style={{ color: '#9aa595', fontStyle: 'italic' }}>updating…</span>}
           <span style={{ color: '#cbd1c4' }}>·</span>
-          <span>Showing data for the past <b style={{ color: '#1c2119' }}>{rangeMeta.months >= 1 ? Math.round(rangeMeta.months) + ' month' + (rangeMeta.months > 1 ? 's' : '') : '7 days'}</b></span>
+          <span>Flow metrics for this period; <b style={{ color: '#1c2119' }}>structural metrics shown as of today{SD.meta?.asOf ? ` (${SD.meta.asOf})` : ''}</b></span>
           <span style={{ color: '#cbd1c4' }}>·</span>
           <span>Tap any tile for the full record list</span>
-          {range !== '365' && (
-            <button onClick={() => setRange('365')} style={{
+          {range !== DEFAULT_RANGE && (
+            <button onClick={() => setRange(DEFAULT_RANGE)} style={{
               marginLeft: 'auto', background: 'transparent', border: '1px solid #e5e8e2',
               color: '#6b7566', fontSize: 10.5, padding: '3px 9px', borderRadius: 5,
               cursor: 'pointer', fontFamily: "'Outfit', sans-serif",
-            }}>Reset to 12 months</button>
+            }}>Reset to Current Month</button>
           )}
         </div>
 
@@ -1038,7 +1044,7 @@ const VarA = (function() {
             <KPI {...k('Move-ins', 'BD', SD.leasing.moveins, null, null, null, false, null, 'moveins')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Apps per move-in', 'BD', SD.leasing.appsPerMovein, null, null, null, false, null, 'appsPerMovein')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Evictions pending', 'BD', SD.leasing.evictionsPending, '', null, '#c0392b', false, 'red', 'evictionsPending')} mobile={mobile} showSource={showSource} />
-            <ChartCard mobile={mobile} title={`Renewals — ${rangeMeta.sliceTail} mo`} subtitle={`${SD.leasing.renewalsCount.value} total`} onClick={() => setDrillKey('renewalsCount')}>
+            <ChartCard mobile={mobile} title={`Renewals — trailing 12 mo`} subtitle={`${SD.leasing.renewalsCount.value} total`} onClick={() => setDrillKey('renewalsCount')}>
               <MiniBars data={SD.renewalsByMonth} valueKey="count" height={mobile?40:46} color="#3d8c1f" />
             </ChartCard>
           </div>

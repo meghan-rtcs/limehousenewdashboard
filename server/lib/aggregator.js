@@ -13,6 +13,27 @@ const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct
 const NEGATE_INCOME = false;
 const NEGATE_EXPENSE = false;
 
+// ── VENDOR COMPLIANCE SCOPE ──────────────────────────────────────────────────
+// "Vendor Type" is a Buildium custom field we plan to add to tag maintenance
+// vendors. It does not exist yet, so the maintenance-only filter below is a
+// no-op until at least one vendor has it populated, at which point the metric
+// AUTOMATICALLY switches to maintenance-only with no further code change.
+// Edit MAINTENANCE_VENDOR_VALUES to match whatever values get used in Buildium.
+const VENDOR_TYPE_FIELD = "Vendor Type";
+const MAINTENANCE_VENDOR_VALUES = ["Maintenance", "Maintenance Vendor"];
+function readVendorType(v) {
+  const arrays = [v.CustomFields, v.CustomFieldValues, v.VendorMessage?.CustomFields].filter(Array.isArray);
+  for (const arr of arrays) {
+    const hit = arr.find(f => (f?.Name || f?.FieldName || "").trim().toLowerCase() === VENDOR_TYPE_FIELD.toLowerCase());
+    if (hit) return String(hit.Value ?? hit.FieldValue ?? "").trim();
+  }
+  return "";
+}
+function isMaintenanceVendor(v) {
+  const t = readVendorType(v).toLowerCase();
+  return MAINTENANCE_VENDOR_VALUES.some(m => m.toLowerCase() === t);
+}
+
 function pct(n, d) { return d ? Math.round((n / d) * 1000) / 10 : 0; }
 function buildKpi(value, prevYear = 0, opts = {}) {
   return { value: value ?? 0, prevYear: prevYear ?? 0, ...opts };
@@ -40,18 +61,92 @@ async function pMap(items, concurrency, fn) {
   return out;
 }
 
-export async function buildDashboard() {
+// ── PERIOD / DATE WINDOWING ──────────────────────────────────────────────────
+// Turns a period key into an explicit { key, label, start, end } window. Flow
+// metrics (income, move-ins, prospects, applications, showings/calls/texts,
+// rent-processing reversals, reconciliations) are computed for [start, end].
+// Structural / point-in-time metrics (occupancy, delinquency, vendor compliance,
+// etc.) ignore the window and are always reported as of "now" — the frontend
+// labels them "as of today".
+export const PERIOD_KEYS = ["currentMonth", "lastMonth", "currentQuarter", "lastQuarter", "currentYear", "lastYear"];
+function fmtRange(start, end) {
+  const opts = { month: "short", day: "numeric", timeZone: "UTC" };
+  const s = start.toLocaleDateString("en-US", opts);
+  const e = end.toLocaleDateString("en-US", { ...opts, year: "numeric" });
+  return `${s} – ${e}`;
+}
+export function periodToWindow(key, now = new Date()) {
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth();
+  const endOfDay = d => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59, 999));
+  let start, end, label;
+  switch (key) {
+    case "lastMonth":
+      start = new Date(Date.UTC(y, m - 1, 1));
+      end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999)); // last day of previous month
+      label = `Last month · ${fmtRange(start, end)}`;
+      break;
+    case "currentQuarter": {
+      const q = Math.floor(m / 3);
+      start = new Date(Date.UTC(y, q * 3, 1));
+      end = endOfDay(now);
+      label = `This quarter · ${fmtRange(start, end)}`;
+      break;
+    }
+    case "lastQuarter": {
+      const q = Math.floor(m / 3);
+      start = new Date(Date.UTC(y, q * 3 - 3, 1));
+      end = new Date(Date.UTC(y, q * 3, 0, 23, 59, 59, 999)); // last day before this quarter
+      label = `Last quarter · ${fmtRange(start, end)}`;
+      break;
+    }
+    case "currentYear":
+      start = new Date(Date.UTC(y, 0, 1));
+      end = endOfDay(now);
+      label = `This year · ${fmtRange(start, end)}`;
+      break;
+    case "lastYear":
+      start = new Date(Date.UTC(y - 1, 0, 1));
+      end = new Date(Date.UTC(y - 1, 11, 31, 23, 59, 59, 999));
+      label = `Last year · ${fmtRange(start, end)}`;
+      break;
+    case "currentMonth":
+    default:
+      key = "currentMonth";
+      start = new Date(Date.UTC(y, m, 1));
+      end = endOfDay(now);
+      label = `This month · ${fmtRange(start, end)}`;
+      break;
+  }
+  return { key, label, start, end };
+}
+
+export async function buildDashboard(win) {
   const now = new Date();
   const todayIso = now.toISOString().slice(0, 10);
   const syncedAt = toET(now).replace(",", " ·");
   const yearAgoIso = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString().slice(0, 10);
 
+  // Selected reporting window for flow metrics. Defaults to the current month.
+  win = win || periodToWindow("currentMonth", now);
+  const winStart = win.start instanceof Date ? win.start : new Date(win.start);
+  const winEnd = win.end instanceof Date ? win.end : new Date(win.end);
+  const winStartIso = winStart.toISOString().slice(0, 10);
+  const winEndIso = winEnd.toISOString().slice(0, 10);
+  const winStartFull = winStart.toISOString();
+  const winEndFull = winEnd.toISOString();
+  const winStartMs = winStart.getTime();
+  const winEndMs = winEnd.getTime();
+  const winKey = win.key || "currentMonth";
+  const winLabel = win.label || "";
+
   // ── RentEngine data (still live — not in DB yet) ───────────────────────
-  const yearAgoFrom = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1)).toISOString();
+  // Flow endpoints (prospects, application groups, per-unit leasing perf) are
+  // pulled for the selected window so showings/calls/texts/prospects honor it.
   const [reUnits, reProspects, reAppGroups, bdApplicants, bdVendors] = await Promise.all([
     safe(rentengine.listUnits(), []),
-    safe(rentengine.listProspects(yearAgoFrom, now.toISOString()), []),
-    safe(rentengine.listApplicationGroups({ createdAfter: yearAgoFrom, createdBefore: now.toISOString() }), []),
+    safe(rentengine.listProspects(winStartFull, winEndFull), []),
+    safe(rentengine.listApplicationGroups({ createdAfter: winStartFull, createdBefore: winEndFull }), []),
     safe(buildium.listApplicants(), []),
     safe(buildium.listVendors(["Active"]), []),
   ]);
@@ -60,23 +155,24 @@ export async function buildDashboard() {
   // texts, applications, property_health) — one call per unit, run in
   // parallel. Each call is wrapped in safe() so a single 404/500 won't
   // poison the whole sync.
-  const perfPeriodEnd = now.toISOString();
+  // Showings / calls / texts are flow metrics → pull perf for the selected
+  // window. days_on_market is a listing-age attribute (independent of the report
+  // window) and is treated as a structural / as-of-today metric downstream.
   const perfList = await Promise.all(
-    reUnits.map(u => safe(rentengine.unitLeasingPerformance(u.id, yearAgoFrom, perfPeriodEnd), null))
+    reUnits.map(u => safe(rentengine.unitLeasingPerformance(u.id, winStartFull, winEndFull), null))
   );
   const perfByUnit = new Map();
   perfList.forEach((p, i) => { if (p) perfByUnit.set(reUnits[i].id, p); });
 
-  // Buildium applications submitted in the trailing 12 months
+  // Buildium applications submitted within the selected window.
   // Each applicant record has Applications[] with ApplicationSubmittedDateTime.
-  const yearAgoMs = new Date(yearAgoIso).getTime();
   const submittedApps = [];
   for (const a of bdApplicants) {
     for (const app of a.Applications || []) {
       const ts = app.ApplicationSubmittedDateTime;
       if (!ts) continue;
       const t = new Date(ts).getTime();
-      if (t >= yearAgoMs && t <= now.getTime()) {
+      if (t >= winStartMs && t <= winEndMs) {
         submittedApps.push({ applicant: a, app });
       }
     }
@@ -88,6 +184,16 @@ export async function buildDashboard() {
 
   const meta = {
     syncedAt, buildiumUnits: totalUnits, rentEngineUnits: reUnits.length, activeLeases: activeLeaseCount,
+    // Selected reporting window for flow metrics + today's date for the
+    // "structural metrics shown as of today" banner note on the frontend.
+    window: { key: winKey, label: winLabel, start: winStartIso, end: winEndIso },
+    asOf: todayIso,
+    // Flow metrics honor the selected window (numbers change per period).
+    // Everything else is point-in-time / structural and reads as-of-today.
+    flowMetrics: [
+      "grossIncome","netIncome","moveins","appsSubmitted","appsPerMovein",
+      "newProspects","showingsCompleted","totalCalls","totalTexts","completionRate",
+    ],
     liveMetrics: [
       "delinquent","delinquentCount","rentCollectedBy3rd","rentCollectedBy10th",
       "avgRentPerDoor","rpu","grossIncome","netIncome",
@@ -312,8 +418,8 @@ export async function buildDashboard() {
   const evictionsPendingCount = queryOne(`SELECT COUNT(*) as c FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND l.is_eviction_pending = 1 AND p.is_active = 1`)?.c || 0;
 
   const appsSubmitted = submittedApps.length;
-  // Move-ins from Buildium: leases that started in the trailing 12 months and aren't Future
-  const moveinsRows = query(`SELECT l.id, l.from_date FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND l.status != 'Future' AND l.from_date >= ? AND l.from_date <= ?`, [yearAgoIso, todayIso]);
+  // Move-ins from Buildium: leases that started within the selected window and aren't Future
+  const moveinsRows = query(`SELECT l.id, l.from_date FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND l.status != 'Future' AND l.from_date >= ? AND l.from_date <= ?`, [winStartIso, winEndIso]);
   const moveins = moveinsRows.length;
 
   const leasing = {
@@ -368,6 +474,32 @@ export async function buildDashboard() {
   const grossIncomeTotal = incomeByMonth.reduce((s, m) => s + m.gross, 0);
   const netIncomeTotal = incomeByMonth.reduce((s, m) => s + m.net, 0);
 
+  // Windowed income (flow): per-calendar-month breakdown clamped to [winStart,
+  // winEnd], used for the gross/net income tiles and their drilldowns so income
+  // tracks the selected period. The 12-month `incomeByMonth` above stays as the
+  // YoY trend chart source.
+  const winMonths = [];
+  {
+    let cur = new Date(Date.UTC(winStart.getUTCFullYear(), winStart.getUTCMonth(), 1));
+    const lastM = new Date(Date.UTC(winEnd.getUTCFullYear(), winEnd.getUTCMonth(), 1));
+    while (cur <= lastM) {
+      const mFirst = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth(), 1));
+      const mLast = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 0));
+      const s = mFirst < winStart ? winStartIso : mFirst.toISOString().slice(0, 10);
+      const e = mLast > winEnd ? winEndIso : mLast.toISOString().slice(0, 10);
+      winMonths.push({ label: MONTH_LABELS[cur.getUTCMonth()], year: cur.getUTCFullYear(), start: s, end: e });
+      cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
+    }
+  }
+  const winIncomeByMonth = winMonths.map(m => {
+    const row = queryOne(`SELECT SUM(CASE WHEN gl_account_type = 'Income' THEN ${incSign} ELSE 0 END) as gross, SUM(CASE WHEN gl_account_type = 'Expense' THEN ${expSign} ELSE 0 END) as expense FROM gl_company_cash WHERE date >= ? AND date <= ?`, [m.start, m.end]);
+    const gross = +(row?.gross || 0);
+    const expense = +(row?.expense || 0);
+    return { month: `${m.label} ${m.year}`, gross, net: gross - expense, _expense: expense };
+  });
+  const winGrossIncome = winIncomeByMonth.reduce((s, m) => s + m.gross, 0);
+  const winNetIncome = winIncomeByMonth.reduce((s, m) => s + m.net, 0);
+
   // RPU = last complete month total income / units. Pulls from gl_company_cash
   // (the same Cash-basis Company-entity source as the Gross income tile) so the
   // numerator equals that month's reported gross income exactly.
@@ -400,8 +532,8 @@ export async function buildDashboard() {
     rentCollectedBy10th: buildKpi(by10th.value, 0, { unit: "%" }),
     avgRentPerDoor: buildKpi(avgRentPerLease, 0, { unit: "$" }),
     rpu: buildKpi(rpuValue, 0, { unit: "$" }),
-    grossIncome: buildKpi(ytdGross, 0, { unit: "$", decimals: 2 }),
-    netIncome: buildKpi(ytdNet, 0, { unit: "$", decimals: 2 }),
+    grossIncome: buildKpi(winGrossIncome, 0, { unit: "$", decimals: 2 }),
+    netIncome: buildKpi(winNetIncome, 0, { unit: "$", decimals: 2 }),
     delinquent: buildKpi(Math.round(delinquentTotal * 100) / 100, 0, { unit: "$", invertDelta: true }),
     delinquentCount: buildKpi(delinquentCount, 0, { invertDelta: true }),
     avgSdWithheld: buildKpi(avgSdWithheld, 0, { unit: "$" }),
@@ -445,20 +577,35 @@ export async function buildDashboard() {
   const sortedDom = [...dom].sort((a, b) => a - b);
   const medianDaysOnMarket = sortedDom.length ? sortedDom[Math.floor(sortedDom.length / 2)] : 0;
 
-  // Roll-ups across ALL RE units in the trailing 12 months (showings, calls,
-  // texts, applications) from the same per-unit reporting endpoint.
-  let showingsScheduled = 0, showingsCompleted = 0, totalCalls = 0, totalTexts = 0, appsRequestedRE = 0, appsSubmittedRE = 0;
+  // Roll-ups across ALL RE units in the trailing 12 months (calls, texts,
+  // applications) from the same per-unit reporting endpoint.
+  let totalCalls = 0, totalTexts = 0, appsRequestedRE = 0, appsSubmittedRE = 0;
   for (const p of perfByUnit.values()) {
-    showingsScheduled += p.showings_scheduled || 0;
-    showingsCompleted += p.showings_completed || 0;
     totalCalls        += p.total_calls || 0;
     totalTexts        += p.outbound_texts || 0;
     appsRequestedRE   += p.applications_requested || 0;
     appsSubmittedRE   += p.applications_submitted || 0;
   }
+  // Showing completion rate — AVAILABLE LISTINGS ONLY (Deb: "I don't want lease
+  // status, I want just available"). Iterate reAvailable and pull each unit's
+  // perf rather than summing every unit.
+  // NOTE: RentEngine's per-unit report does not break showings into types — only
+  // showings_scheduled / showings_completed exist (no accompanied vs self split),
+  // so self-showings cannot be excluded. Logged once below for confirmation.
+  let showingsScheduled = 0, showingsCompleted = 0;
+  for (const u of reAvailable) {
+    const p = perfByUnit.get(u.id);
+    if (!p) continue;
+    showingsScheduled += p.showings_scheduled || 0;
+    showingsCompleted += p.showings_completed || 0;
+  }
   const completionRate = showingsScheduled > 0
     ? Math.round((showingsCompleted / showingsScheduled) * 1000) / 10
     : 0;
+  // One-time visibility into the RentEngine per-unit perf fields so we can
+  // confirm there is no accompanied/self showing breakdown to exclude.
+  const _firstPerf = [...perfByUnit.values()][0];
+  if (_firstPerf) console.log("[agg] RentEngine perf fields:", Object.keys(_firstPerf).join(", "));
 
   const marketing = {
     unitsOnMarket: buildKpi(unitsOnMarket, 0, { invertDelta: true }),
@@ -587,17 +734,28 @@ export async function buildDashboard() {
   const todayMs = now.getTime();
   let vendorCompliancePct = null;
   let vendor1099Pct = null;
-  if (Array.isArray(bdVendors) && bdVendors.length) {
-    const compliant = bdVendors.filter(v => {
+  // Buildium's ?statuses=Active query is unreliable (it returns inactive vendors),
+  // so re-filter on each record's own IsActive flag. Then, if the "Vendor Type"
+  // custom field is populated on any vendor, scope the metric to maintenance
+  // vendors only. Until that field exists this is a no-op (falls back to all
+  // active vendors) — see VENDOR_TYPE_FIELD / readVendorType near the top.
+  const activeVendors = (bdVendors || []).filter(v => v.IsActive !== false);
+  const anyVendorTyped = activeVendors.some(v => readVendorType(v));
+  const scopedVendors = anyVendorTyped ? activeVendors.filter(isMaintenanceVendor) : activeVendors;
+  const vendorScopeLabel = anyVendorTyped
+    ? "maintenance vendors (Vendor Type field detected)"
+    : "all active vendors (Vendor Type field not yet populated)";
+  if (scopedVendors.length) {
+    const compliant = scopedVendors.filter(v => {
       const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
       const ins = v.VendorInsurance || v.VendorMessage?.VendorInsurance;
       const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
       const insExp = ins?.ExpirationDate ? new Date(ins.ExpirationDate).getTime() : 0;
       return hasTax && insExp > todayMs;
     }).length;
-    vendorCompliancePct = Math.round((compliant / bdVendors.length) * 1000) / 10;
+    vendorCompliancePct = Math.round((compliant / scopedVendors.length) * 1000) / 10;
 
-    const v1099 = bdVendors.filter(v => {
+    const v1099 = scopedVendors.filter(v => {
       const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
       return tax && tax.IncludeIn1099 === true;
     });
@@ -613,79 +771,121 @@ export async function buildDashboard() {
   // ── RECONCILIATION ACCURACY ────────────────────────────────────────────
   // Pull reconciliations for each active bank account. "Accuracy" = % of
   // expected monthly reconciliations (one per active bank account per month)
-  // completed in the last 12 fully-elapsed months.
+  // completed across the fully-elapsed calendar months inside the selected
+  // window. A partial current month is not yet reconcilable, so windows that
+  // contain no completed month (e.g. "this month" early on) expect 0.
   let reconAccuracyPct = null;
   let reconTotalDone = 0;
   let reconTotalExpected = 0;
   const reconRowsRaw = [];
   const bankAccounts = await safe(buildium.listBankAccounts(), []);
-  const activeBankAccounts = (bankAccounts || []).filter(b => b.GLAccount?.IsActive !== false);
-  if (activeBankAccounts.length) {
-    const expectedMonths = [];
-    const mc = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    for (let i = 0; i < 12; i++) {
-      expectedMonths.push(`${mc.getFullYear()}-${String(mc.getMonth() + 1).padStart(2, "0")}`);
-      mc.setMonth(mc.getMonth() - 1);
+  const activeBankAccounts = (bankAccounts || []).filter(b => b.IsActive !== false && b.GLAccount?.IsActive !== false);
+  let reconExcludedCount = 0;
+  // Completed calendar months (YYYY-MM) whose month-end falls within the window
+  // and on/before today.
+  const expectedMonths = [];
+  {
+    let cur = new Date(Date.UTC(winStart.getUTCFullYear(), winStart.getUTCMonth(), 1));
+    const lastM = new Date(Date.UTC(winEnd.getUTCFullYear(), winEnd.getUTCMonth(), 1));
+    while (cur <= lastM) {
+      const monthEnd = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+      if (monthEnd.getTime() <= Math.min(winEndMs, now.getTime())) {
+        expectedMonths.push(`${cur.getUTCFullYear()}-${String(cur.getUTCMonth() + 1).padStart(2, "0")}`);
+      }
+      cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
     }
+  }
+  if (activeBankAccounts.length) {
     const reconLists = await pMap(activeBankAccounts, 5, b => safe(buildium.listReconciliations(b.Id), []));
     activeBankAccounts.forEach((b, i) => {
       const finished = (reconLists[i] || []).filter(r => r.IsFinished);
       finished.sort((a, c) => (c.StatementEndingDate || "").localeCompare(a.StatementEndingDate || ""));
       const doneMonths = new Set(finished.map(r => (r.StatementEndingDate || "").slice(0, 7)));
       const monthsDone = expectedMonths.filter(m => doneMonths.has(m)).length;
+      const balance = Number(b.Balance) || 0;
+      const name = b.GLAccount?.Name || b.Name || `#${b.Id}`;
+      // Exclude accounts with NOTHING to reconcile: zero finished reconciliations
+      // AND a zero balance (e.g. a backup card used twice in a year, no balance).
+      // Those months are neither expected nor missed — drop them from the
+      // denominator. But a NONZERO balance with no reconciliation IS a real miss
+      // Deb wants to see, so those stay counted.
+      const excluded = finished.length === 0 && balance === 0;
+      if (excluded) {
+        reconExcludedCount++;
+        reconRowsRaw.push({ name, lastFinished: null, monthsDone: 0, balance, excluded: true });
+        return;
+      }
       reconTotalExpected += expectedMonths.length;
       reconTotalDone += monthsDone;
-      reconRowsRaw.push({
-        name: b.GLAccount?.Name || `#${b.Id}`,
-        lastFinished: finished[0]?.StatementEndingDate || null,
-        monthsDone,
-      });
+      reconRowsRaw.push({ name, lastFinished: finished[0]?.StatementEndingDate || null, monthsDone, balance, excluded: false });
     });
     if (reconTotalExpected > 0) {
       reconAccuracyPct = Math.round((reconTotalDone / reconTotalExpected) * 1000) / 10;
     }
-    reconRowsRaw.sort((a, c) => c.monthsDone - a.monthsDone || a.name.localeCompare(c.name));
+    reconRowsRaw.sort((a, c) => Number(a.excluded) - Number(c.excluded) || c.monthsDone - a.monthsDone || a.name.localeCompare(c.name));
   }
 
   // ── RENT PROCESSING ACCURACY ───────────────────────────────────────────
-  // For every active lease, count Payment vs ReversePayment transactions in
-  // the trailing 90 days. accuracy = 1 − (reversals ÷ payments). Throttled
+  // For every active lease, count Payment vs ReversePayment transactions inside
+  // the selected window. accuracy = 1 − (reversals ÷ payments). Throttled
   // to concurrency 5 to stay under Buildium's rate limit. Adds ~30–60s per
   // full sync; cached for 10 min.
   let rentProcessingPct = null;
   let rpPayments = 0;
-  let rpReversals = 0;
-  const rentReversalRowsRaw = [];
+  let rpReversals = 0;             // total reversals (operational + NSF)
+  let rpOperationalReversals = 0;  // counted against accuracy
+  let rpNsfReversals = 0;          // tenant-driven, NOT counted
+  const rentReversalRowsRaw = [];  // operational reversals (counted)
+  const nsfReversalRowsRaw = [];   // NSF / bounced rent (informational only)
+  // NSF / bounced-payment language seen on a reversal memo or its matching fee.
+  const NSF_RE = /\b(nsf|returned|bounced|insufficient|non-?sufficient|charge\s*-?\s*back|chargeback|declined)\b/i;
   const activeLeasesForRP = allLeasesAPI.filter(l => l.LeaseStatus === "Active");
-  const rpWindowStartIso = new Date(now.getTime() - 90 * 86400000).toISOString().slice(0, 10);
   if (activeLeasesForRP.length) {
     const rpTxnLists = await pMap(activeLeasesForRP, 5, l => safe(buildium.leaseTransactions(l.Id), []));
     activeLeasesForRP.forEach((lease, i) => {
-      const txs = rpTxnLists[i] || [];
+      const txs = (rpTxnLists[i] || []).filter(t => t.Date && t.Date >= winStartIso && t.Date <= winEndIso);
+      // Dates of NSF-related charges/fees on this lease, used to flag a reversal
+      // that has no NSF text on itself but is paired with an NSF fee nearby.
+      const nsfFeeDates = txs
+        .filter(t => {
+          const ty = t.TransactionTypeEnum || t.TransactionType;
+          const memo = `${t.Memo || ""} ${t.Journal?.Memo || ""}`;
+          return (ty === "Charge" || ty === "Fee") && NSF_RE.test(memo);
+        })
+        .map(t => new Date(t.Date).getTime());
       for (const t of txs) {
-        if (!t.Date || t.Date < rpWindowStartIso) continue;
         const type = t.TransactionTypeEnum || t.TransactionType;
         if (type === "Payment") rpPayments++;
         else if (type === "ReversePayment") {
           rpReversals++;
-          rentReversalRowsRaw.push({
+          const memo = `${t.Memo || ""} ${t.Journal?.Memo || ""}`.trim();
+          const tMs = new Date(t.Date).getTime();
+          const memoNsf = NSF_RE.test(memo);
+          const nearNsfFee = nsfFeeDates.some(d => Math.abs(d - tMs) <= 5 * 86400000);
+          const isNsf = memoNsf || nearNsfFee;  // unclassifiable reversals stay counted
+          const row = {
             propertyId: lease.PropertyId,
             unitNumber: lease.UnitNumber,
             date: t.Date,
             amount: Math.abs(Number(t.TotalAmount) || 0),
-          });
+            memo,
+            reason: memoNsf ? "NSF memo" : (nearNsfFee ? "matched NSF fee" : ""),
+          };
+          if (isNsf) { rpNsfReversals++; nsfReversalRowsRaw.push(row); }
+          else { rpOperationalReversals++; rentReversalRowsRaw.push(row); }
         }
       }
     });
     if (rpPayments > 0) {
-      rentProcessingPct = Math.round(((rpPayments - rpReversals) / rpPayments) * 1000) / 10;
+      rentProcessingPct = Math.round(((rpPayments - rpOperationalReversals) / rpPayments) * 1000) / 10;
     }
     rentReversalRowsRaw.sort((a, c) => (c.date || "").localeCompare(a.date || ""));
+    nsfReversalRowsRaw.sort((a, c) => (c.date || "").localeCompare(a.date || ""));
   }
 
   const roleKpis = {
     asOf: todayIso,
-    vendorCount: Array.isArray(bdVendors) ? bdVendors.length : 0,
+    vendorCount: scopedVendors.length,
     roles: [
       {
         abbrev: "PM", name: "Portfolio Manager", people: 3,
@@ -778,18 +978,18 @@ export async function buildDashboard() {
     evictionsPending: { title: "Evictions", cols: ["Property", "Unit"], rows: query("SELECT u.property_id, u.unit_number FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND l.is_eviction_pending = 1 AND p.is_active = 1 LIMIT 200").map(l => [propName(l.property_id), l.unit_number || "—"]), summary: `${evictionsPendingCount}` },
     avgRentPerDoor: { title: "Leases by rent", cols: ["Property", "Unit", "Rent"], rows: activeLeaseRows.map(l => [propName(l.property_id), l.unit_number || "—", l.rent ? `$${Math.round(l.rent).toLocaleString()}` : "—"]), summary: `Avg $${avgRentPerLease}` },
     rpu: { title: `RPU — ${lcm ? lcm.label : 'last month'}`, cols: ["Month", "RPU"], rows: incomeByMonth.map(m => [m.month, `$${(totalUnits ? Math.round((m.gross) / totalUnits) : 0).toLocaleString()}`]), summary: `$${rpuValue.toLocaleString()}/unit` },
-    grossIncome: { title: "Gross income — YTD", cols: ["Month", "Gross"], rows: incomeByMonth.map(m => [m.month, `$${m.gross.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`]), summary: `$${grossIncomeTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
-    netIncome: { title: "Net income — YTD", cols: ["Month", "Gross", "Expense", "Net"], rows: incomeByMonth.map(m => [m.month, `$${m.gross.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, `$${(m._expense || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, `$${m.net.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`]), summary: `$${netIncomeTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
+    grossIncome: { title: `Gross income — ${winLabel}`, cols: ["Month", "Gross"], rows: winIncomeByMonth.map(m => [m.month, `$${m.gross.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`]), summary: `$${winGrossIncome.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
+    netIncome: { title: `Net income — ${winLabel}`, cols: ["Month", "Gross", "Expense", "Net"], rows: winIncomeByMonth.map(m => [m.month, `$${m.gross.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, `$${(m._expense || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, `$${m.net.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`]), summary: `$${winNetIncome.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
     rentCollectedBy3rd: { title: "Rent by 3rd", cols: ["Note"], rows: [["Snapshots accumulate over time."]], summary: `${by3rd.value}% (${by3rd.monthsCounted} months)` },
     rentCollectedBy10th: { title: "Rent by 10th", cols: ["Note"], rows: [["Snapshots accumulate over time."]], summary: `${by10th.value}% (${by10th.monthsCounted} months)` },
     newProspects: { title: "Prospects", cols: ["Name", "Source", "Created"], rows: reProspects.slice(-200).reverse().map(p => [p.name || "—", p.source || "—", (p.created_at || "").slice(0, 10)]), summary: `${newProspects} prospects` },
-    appsSubmitted: { title: "Applications submitted (last 12 mo)", cols: ["Applicant", "Status", "App #", "Submitted"], rows: submittedApps.slice().sort((x, y) => (y.app.ApplicationSubmittedDateTime || "").localeCompare(x.app.ApplicationSubmittedDateTime || "")).slice(0, 500).map(({ applicant, app }) => [`${applicant.FirstName || ""} ${applicant.LastName || ""}`.trim() || "—", app.ApplicationStatus || applicant.Status || "—", app.ApplicationNumber || String(app.Id || ""), (app.ApplicationSubmittedDateTime || "").slice(0, 10)]), summary: `${appsSubmitted} applications submitted` },
-    moveins: { title: "Move-ins (last 12 mo)", cols: ["Property", "Unit", "Start"], rows: query(`SELECT l.from_date, l.property_id, u.unit_number FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND l.status != 'Future' AND l.from_date >= ? AND l.from_date <= ? ORDER BY l.from_date DESC LIMIT 200`, [yearAgoIso, todayIso]).map(r => [propName(r.property_id), r.unit_number || "—", r.from_date || "—"]), summary: `${moveins} move-ins` },
+    appsSubmitted: { title: `Applications submitted — ${winLabel}`, cols: ["Applicant", "Status", "App #", "Submitted"], rows: submittedApps.slice().sort((x, y) => (y.app.ApplicationSubmittedDateTime || "").localeCompare(x.app.ApplicationSubmittedDateTime || "")).slice(0, 500).map(({ applicant, app }) => [`${applicant.FirstName || ""} ${applicant.LastName || ""}`.trim() || "—", app.ApplicationStatus || applicant.Status || "—", app.ApplicationNumber || String(app.Id || ""), (app.ApplicationSubmittedDateTime || "").slice(0, 10)]), summary: `${appsSubmitted} applications submitted` },
+    moveins: { title: `Move-ins — ${winLabel}`, cols: ["Property", "Unit", "Start"], rows: query(`SELECT l.from_date, l.property_id, u.unit_number FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND l.status != 'Future' AND l.from_date >= ? AND l.from_date <= ? ORDER BY l.from_date DESC LIMIT 200`, [winStartIso, winEndIso]).map(r => [propName(r.property_id), r.unit_number || "—", r.from_date || "—"]), summary: `${moveins} move-ins` },
     appsPerMovein: { title: "Funnel", cols: ["Stage", "Count"], rows: [["Apps", String(appsSubmitted)], ["Move-ins", String(moveins)], ["Ratio", moveins ? (appsSubmitted / moveins).toFixed(1) : "—"]], summary: moveins ? `${(appsSubmitted / moveins).toFixed(1)} apps per move-in` : "—" },
-    completionRate: { title: "Showing completion rate", cols: ["Address", "Status", "Scheduled", "Completed", "Rate"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.showings_scheduled) return null; const r = Math.round((p.showings_completed / p.showings_scheduled) * 1000) / 10; return [reAddr(u), u.status || "—", String(p.showings_scheduled), String(p.showings_completed), `${r}%`]; }).filter(Boolean), summary: `${showingsCompleted}/${showingsScheduled} = ${completionRate}%`, note: "Sum of showings_completed ÷ sum of showings_scheduled across all RentEngine units in the trailing 12 months." },
-    showingsCompleted: { title: "Showings completed (last 12 mo)", cols: ["Unit", "Status", "Scheduled", "Completed"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || (!p.showings_scheduled && !p.showings_completed)) return null; return [String(u.id), u.status || "—", String(p.showings_scheduled || 0), String(p.showings_completed || 0)]; }).filter(Boolean), summary: `${showingsCompleted} completed · ${showingsScheduled} scheduled`, note: "From RentEngine /reporting/leasing-performance/units, summed across all units in the trailing 12 months." },
-    totalCalls: { title: "Calls (last 12 mo)", cols: ["Unit", "Status", "Calls"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.total_calls) return null; return [String(u.id), u.status || "—", String(p.total_calls)]; }).filter(Boolean).sort((a, b) => Number(b[2]) - Number(a[2])), summary: `${totalCalls} calls`, note: "From RentEngine /reporting/leasing-performance/units total_calls field, summed across all units in the trailing 12 months." },
-    totalTexts: { title: "Outbound texts (last 12 mo)", cols: ["Unit", "Status", "Texts"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.outbound_texts) return null; return [String(u.id), u.status || "—", String(p.outbound_texts)]; }).filter(Boolean).sort((a, b) => Number(b[2]) - Number(a[2])), summary: `${totalTexts} texts`, note: "From RentEngine /reporting/leasing-performance/units outbound_texts field, summed across all units in the trailing 12 months." },
+    completionRate: { title: `Showing completion rate — ${winLabel}`, cols: ["Address", "Status", "Scheduled", "Completed", "Rate"], rows: reAvailable.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.showings_scheduled) return null; const r = Math.round((p.showings_completed / p.showings_scheduled) * 1000) / 10; return [reAddr(u), u.status || "—", String(p.showings_scheduled), String(p.showings_completed), `${r}%`]; }).filter(Boolean), summary: `${showingsCompleted}/${showingsScheduled} = ${completionRate}%`, note: `Sum of showings_completed ÷ sum of showings_scheduled across AVAILABLE listings only (status not 'Leased') within ${winLabel}. RentEngine does not split showings into accompanied vs self, so self-showings cannot be excluded.` },
+    showingsCompleted: { title: `Showings completed — ${winLabel}`, cols: ["Address", "Status", "Scheduled", "Completed"], rows: reAvailable.map(u => { const p = perfByUnit.get(u.id); if (!p || (!p.showings_scheduled && !p.showings_completed)) return null; return [reAddr(u), u.status || "—", String(p.showings_scheduled || 0), String(p.showings_completed || 0)]; }).filter(Boolean), summary: `${showingsCompleted} completed · ${showingsScheduled} scheduled`, note: `From RentEngine /reporting/leasing-performance/units, summed across AVAILABLE listings only (status not 'Leased') within ${winLabel}.` },
+    totalCalls: { title: `Calls — ${winLabel}`, cols: ["Unit", "Status", "Calls"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.total_calls) return null; return [String(u.id), u.status || "—", String(p.total_calls)]; }).filter(Boolean).sort((a, b) => Number(b[2]) - Number(a[2])), summary: `${totalCalls} calls`, note: `From RentEngine /reporting/leasing-performance/units total_calls field, summed across all units within ${winLabel}.` },
+    totalTexts: { title: `Outbound texts — ${winLabel}`, cols: ["Unit", "Status", "Texts"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.outbound_texts) return null; return [String(u.id), u.status || "—", String(p.outbound_texts)]; }).filter(Boolean).sort((a, b) => Number(b[2]) - Number(a[2])), summary: `${totalTexts} texts`, note: `From RentEngine /reporting/leasing-performance/units outbound_texts field, summed across all units within ${winLabel}.` },
     unitsOnMarket: { title: "On market", cols: ["Address", "Status", "Health", "Days"], rows: reAvailable.slice(0, 200).map(u => { const p = perfByUnit.get(u.id); const d = p?.days_on_market != null ? p.days_on_market : (u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0); return [reAddr(u), u.status || "—", p?.property_health || "—", String(d)]; }), summary: `${unitsOnMarket} listed`, note: "All RentEngine units whose status is not 'Leased' (Available + On Hold). The 'is_occupied' flag is intentionally ignored because it lags reality. Days and Health come from RentEngine's per-unit leasing-performance report." },
     avgDaysOnMarket: { title: "Days on market", cols: ["Address", "Status", "Health", "Days"], rows: reAvailable.slice(0, 200).map(u => { const p = perfByUnit.get(u.id); const d = p?.days_on_market != null ? p.days_on_market : (u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0); return [reAddr(u), u.status || "—", p?.property_health || "—", String(d)]; }), summary: `Avg ${avgDaysOnMarket} · Median ${medianDaysOnMarket}`, note: "True days_on_market from RentEngine's per-unit leasing-performance report (resets when a unit is re-listed)." },
     medianDaysOnMarket: { title: "Median DOM", cols: ["ID", "Days"], rows: [], summary: `Median ${medianDaysOnMarket} days` },
@@ -864,43 +1064,54 @@ export async function buildDashboard() {
     kpiShowingCompletion: {
       title: "Showing Completion Rate",
       cols: ["Address", "Status", "Scheduled", "Completed", "Rate"],
-      rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.showings_scheduled) return null; const r = Math.round((p.showings_completed / p.showings_scheduled) * 1000) / 10; return [reAddr(u), u.status || "—", String(p.showings_scheduled), String(p.showings_completed), `${r}%`]; }).filter(Boolean),
-      summary: `${showingsCompleted} completed ÷ ${showingsScheduled} scheduled = ${completionRate}% · target ≥95%`,
-      note: `Formula: Σ showings_completed ÷ Σ showings_scheduled across all RentEngine units in the trailing 12 months. Source: RentEngine /reporting/leasing-performance/units/{unitId}.`,
+      rows: reAvailable.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.showings_scheduled) return null; const r = Math.round((p.showings_completed / p.showings_scheduled) * 1000) / 10; return [reAddr(u), u.status || "—", String(p.showings_scheduled), String(p.showings_completed), `${r}%`]; }).filter(Boolean),
+      summary: `${showingsCompleted} completed ÷ ${showingsScheduled} scheduled = ${completionRate}% · available listings only · target ≥95%`,
+      note: `Formula: Σ showings_completed ÷ Σ showings_scheduled across AVAILABLE listings only (RentEngine status not 'Leased') within ${winLabel}. RentEngine does not break showings into accompanied vs self, so self-showings cannot be excluded. Source: RentEngine /reporting/leasing-performance/units/{unitId}.`,
     },
     kpiReconciliation: {
       title: "Reconciliation Accuracy",
-      cols: ["Bank Account", "Last Reconciled", "Months Done (last 12)", "Status"],
+      cols: ["Bank Account", "Last Reconciled", `Months Done (${expectedMonths.length})`, "Balance", "Status"],
       rows: reconRowsRaw.map(r => [
         r.name,
         r.lastFinished || "never",
-        `${r.monthsDone} / 12`,
-        r.monthsDone === 12 ? "on track" : (r.monthsDone === 0 ? "never reconciled" : "lagging"),
+        r.excluded ? "—" : `${r.monthsDone} / ${expectedMonths.length}`,
+        `$${(Number(r.balance) || 0).toFixed(2)}`,
+        r.excluded ? "no activity (excluded)" : (r.monthsDone === expectedMonths.length ? "on track" : (r.monthsDone === 0 ? "never reconciled" : "lagging")),
       ]),
       summary: reconAccuracyPct != null
-        ? `${reconTotalDone} / ${reconTotalExpected} expected reconciliations completed = ${reconAccuracyPct}% · target 100%`
-        : "No active bank accounts found",
-      note: `Formula: across all ${activeBankAccounts.length} active bank accounts, count how many of the last 12 completed months have a finished reconciliation (StatementEndingDate falls in that month and IsFinished=true). Accuracy = done ÷ expected (${activeBankAccounts.length} accounts × 12 months = ${activeBankAccounts.length * 12} expected). Source: Buildium /v1/bankaccounts and /v1/bankaccounts/{id}/reconciliations.`,
+        ? `${reconTotalDone} / ${reconTotalExpected} expected reconciliations completed = ${reconAccuracyPct}%${reconExcludedCount ? ` · ${reconExcludedCount} excluded (no activity)` : ""} · target 100%`
+        : (expectedMonths.length ? "No active bank accounts found" : "No completed months in this period yet"),
+      note: `Formula: across active bank accounts, count how many of the ${expectedMonths.length} completed month(s) inside ${winLabel} have a finished reconciliation (StatementEndingDate falls in that month and IsFinished=true). Accuracy = done ÷ expected. A partial current month is not yet reconcilable and is not counted. Accounts with ZERO finished reconciliations AND a $0 balance are excluded entirely (nothing to reconcile) — ${reconExcludedCount} excluded. An account with a nonzero balance but no reconciliation still counts as a miss. Source: Buildium /v1/bankaccounts (Balance, IsActive) and /v1/bankaccounts/{id}/reconciliations.`,
     },
     kpiRentProcessing: {
       title: "Rent Processing Accuracy",
-      cols: ["Property", "Unit", "Reversed Date", "Amount"],
-      rows: rentReversalRowsRaw.length
-        ? rentReversalRowsRaw.map(r => [
-            propName(r.propertyId),
-            r.unitNumber || "—",
-            r.date,
-            `$${r.amount.toFixed(2)}`,
-          ])
-        : [["—", "—", "—", "No reversed payments in the last 90 days"]],
+      cols: ["Property", "Unit", "Reversed Date", "Amount", "Category"],
+      rows: (rentReversalRowsRaw.length || nsfReversalRowsRaw.length)
+        ? [
+            ...rentReversalRowsRaw.map(r => [
+              propName(r.propertyId),
+              r.unitNumber || "—",
+              r.date,
+              `$${r.amount.toFixed(2)}`,
+              "Operational reversal (counted)",
+            ]),
+            ...nsfReversalRowsRaw.map(r => [
+              propName(r.propertyId),
+              r.unitNumber || "—",
+              r.date,
+              `$${r.amount.toFixed(2)}`,
+              `NSF / bounced rent — informational${r.reason ? ` (${r.reason})` : ""}`,
+            ]),
+          ]
+        : [["—", "—", "—", "—", `No reversed payments within ${winLabel}`]],
       summary: rentProcessingPct != null
-        ? `${rpReversals} reversed ÷ ${rpPayments} payments in last 90 days = ${rentProcessingPct}% clean · target 100%`
-        : "No payments recorded in last 90 days",
-      note: `Formula: 1 − (ReversePayment count ÷ Payment count) across every active lease, looking at the trailing 90 days. Each reversal is a tenant payment that bounced, was charged back, or had to be undone for any reason. Source: Buildium /v1/leases/{leaseId}/transactions filtered by TransactionTypeEnum = Payment / ReversePayment. ${activeLeasesForRP.length} active leases checked.`,
+        ? `${rpOperationalReversals} operational reversals ÷ ${rpPayments} payments within ${winLabel} = ${rentProcessingPct}% clean · ${rpNsfReversals} NSF/bounced excluded · target 100%`
+        : `No payments recorded within ${winLabel}`,
+      note: `Formula: 1 − (operational ReversePayment count ÷ Payment count) across every active lease, within ${winLabel}. NSF / bounced / charged-back / returned reversals are tenant-driven (not a processing error) and are EXCLUDED from the accuracy %, but still listed here as informational. A reversal is classified NSF if its memo matches NSF/returned/bounced/insufficient/chargeback/declined OR it is within 5 days of an NSF fee on the same lease. Of ${rpReversals} total reversals: ${rpOperationalReversals} operational (counted), ${rpNsfReversals} NSF (excluded). Source: Buildium /v1/leases/{leaseId}/transactions, TransactionTypeEnum = Payment / ReversePayment. ${activeLeasesForRP.length} active leases checked.`,
     },
     kpiVendorCompliance: (() => {
       const todayMsLocal = todayMs;
-      const rows = (bdVendors || []).map(v => {
+      const rows = scopedVendors.map(v => {
         const tax = v.TaxInformation || v.VendorTaxInformation || v.VendorMessage?.TaxInformation;
         const ins = v.VendorInsurance || v.VendorMessage?.VendorInsurance;
         const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
@@ -915,6 +1126,7 @@ export async function buildDashboard() {
         const name = v.CompanyName || `${v.FirstName || ""} ${v.LastName || ""}`.trim() || `#${v.Id}`;
         return {
           name,
+          vendorType: readVendorType(v) || "—",
           hasTax, expDate: expDate ? expDate.slice(0, 10) : "—", insOk, compliant,
           status: compliant ? "compliant" : reasons.join(" + "),
         };
@@ -923,14 +1135,14 @@ export async function buildDashboard() {
       const okCount = rows.filter(r => r.compliant).length;
       return {
         title: "Vendor Compliance",
-        cols: ["Vendor", "TaxPayerId", "Insurance Expires", "Status"],
-        rows: rows.map(r => [r.name, r.hasTax ? "yes" : "no", r.expDate, r.status]),
-        summary: `${okCount} compliant ÷ ${rows.length} active vendors = ${vendorCompliancePct ?? "—"}% · target 100%`,
-        note: `Formula: active vendors where TaxPayerId is populated AND VendorInsurance.ExpirationDate > today, ÷ total active vendors. Source: Buildium /v1/vendors?statuses=Active, reading TaxInformation.TaxPayerId and VendorInsurance.ExpirationDate on each record.`,
+        cols: ["Vendor", "Vendor Type", "TaxPayerId", "Insurance Expires", "Status"],
+        rows: rows.map(r => [r.name, r.vendorType, r.hasTax ? "yes" : "no", r.expDate, r.status]),
+        summary: `${okCount} compliant ÷ ${rows.length} ${vendorScopeLabel} = ${vendorCompliancePct ?? "—"}% · target 100%`,
+        note: `Scope: ${vendorScopeLabel}. Buildium's ?statuses=Active filter is unreliable so vendors are re-filtered on each record's own IsActive flag (inactive vendors dropped). If a "Vendor Type" custom field is populated on any vendor, the metric automatically narrows to maintenance vendors only; until then it covers all active vendors. Formula: scoped vendors where TaxPayerId is populated AND VendorInsurance.ExpirationDate > today, ÷ total scoped vendors. Source: Buildium /v1/vendors, reading IsActive, CustomFields ("Vendor Type"), TaxInformation.TaxPayerId and VendorInsurance.ExpirationDate.`,
       };
     })(),
     kpi1099Compliance: (() => {
-      const rows = (bdVendors || []).filter(v => {
+      const rows = scopedVendors.filter(v => {
         const tax = v.TaxInformation || v.VendorTaxInformation || v.VendorMessage?.TaxInformation;
         return tax && tax.IncludeIn1099 === true;
       }).map(v => {
@@ -938,16 +1150,16 @@ export async function buildDashboard() {
         const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
         const name = v.CompanyName || `${v.FirstName || ""} ${v.LastName || ""}`.trim() || `#${v.Id}`;
         const taxType = tax?.TaxPayerIdType || "—";
-        return { name, hasTax, taxType, status: hasTax ? "compliant" : "missing TaxPayerId" };
+        return { name, vendorType: readVendorType(v) || "—", hasTax, taxType, status: hasTax ? "compliant" : "missing TaxPayerId" };
       });
       rows.sort((a, b) => Number(a.hasTax) - Number(b.hasTax) || a.name.localeCompare(b.name));
       const okCount = rows.filter(r => r.hasTax).length;
       return {
         title: "1099 Compliance",
-        cols: ["Vendor", "Tax ID Type", "TaxPayerId", "Status"],
-        rows: rows.map(r => [r.name, r.taxType, r.hasTax ? "yes" : "no", r.status]),
+        cols: ["Vendor", "Vendor Type", "Tax ID Type", "TaxPayerId", "Status"],
+        rows: rows.map(r => [r.name, r.vendorType, r.taxType, r.hasTax ? "yes" : "no", r.status]),
         summary: `${okCount} with TaxPayerId ÷ ${rows.length} flagged IncludeIn1099 = ${vendor1099Pct ?? "—"}% · target 100% by Jan`,
-        note: `Formula: vendors where IncludeIn1099 is true AND TaxPayerId is populated, ÷ vendors where IncludeIn1099 is true. Source: Buildium /v1/vendors?statuses=Active, reading TaxInformation.IncludeIn1099 and TaxInformation.TaxPayerId.`,
+        note: `Scope: ${vendorScopeLabel}. Formula: scoped vendors where IncludeIn1099 is true AND TaxPayerId is populated, ÷ scoped vendors where IncludeIn1099 is true. Source: Buildium /v1/vendors (IsActive + "Vendor Type" custom field), reading TaxInformation.IncludeIn1099 and TaxInformation.TaxPayerId.`,
       };
     })(),
   };

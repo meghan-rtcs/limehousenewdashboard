@@ -1,0 +1,140 @@
+# Limehouse Dashboard - Fix Prompt (from June 18 Deb/Jason call)
+
+Paste this into Replit. It covers five fixes to the live dashboard. The knowledge base / Lamona issues are a separate app and are intentionally out of scope.
+
+Stack reminder for context: Express server in `server/`, metrics computed in `server/lib/aggregator.js`, Buildium/RentEngine helpers in `server/lib/buildium.js` and `server/lib/rentengine.js`. Frontend is JSX in `Limehouse Revamp/` compiled server-side by `server/lib/bundle.js`. The date filter lives in `Limehouse Revamp/components/var-a.jsx`.
+
+Make these changes, keep everything else intact, and do not touch the LeadSimple/Team Performance bonus logic except where step 5 explicitly says to.
+
+---
+
+## Fix 1 - Reconciliation Accuracy: stop penalizing unused bank accounts
+
+File: `server/lib/aggregator.js`, the `RECONCILIATION ACCURACY` block (currently around lines 613-648), plus the `kpiReconciliation` drilldown.
+
+Problem: accuracy counts one expected reconciliation per active bank account per month for the last 12 months. A backup card that was barely used (Jason's Capital One, used twice in 12 months, no balance) shows "never reconciled" and drags the metric down even though there was nothing to reconcile.
+
+Required logic:
+- Keep counting expected reconciliations only for months where the account actually had activity or a nonzero balance. If an account had no transactions and a zero balance in a given month, that month is neither expected nor done. It is excluded from the denominator, not counted as a miss.
+- Practically: for each active bank account, determine which of the last 12 months had activity. Use the reconciliation records themselves plus a balance check. If Buildium does not expose per-month activity cheaply, treat an account with zero finished reconciliations AND a current balance of 0 as fully out of scope (exclude all 12 months for that account). If it has a balance but no reconciliation, keep counting it against the metric (that is a real miss Deb wants to see).
+- Net rule Deb stated: "if it's not being used, don't have it count against it if there's no balance, but if there's a balance and it's not reconciled, that is important to know."
+
+Drilldown update: in `kpiReconciliation`, add a Status value of "no activity (excluded)" for accounts that were dropped from the denominator, so the table shows why an account is not counted rather than hiding it. Update the formula note to say excluded-for-inactivity accounts are removed from the denominator.
+
+---
+
+## Fix 2 - Rent Processing Accuracy: exclude NSF reversals
+
+File: `server/lib/aggregator.js`, the `RENT PROCESSING ACCURACY` block (currently around lines 650-684), plus the `kpiRentProcessing` drilldown.
+
+Problem: the metric is `1 - (ReversePayment count / Payment count)` over 90 days. Jason confirmed the reversals are almost entirely tenant NSF / bounced rent, which the team cannot control. Counting those as processing errors makes the bookkeeper look bad for something outside their control.
+
+Required logic:
+- Exclude reversals that are NSF / bounced-payment driven from the accuracy calculation. Detect these by inspecting the reversal transaction: NSF-related memo text (for example contains "NSF", "returned", "bounced", "insufficient"), and/or an associated NSF fee/charge on the same lease around the same date. Use whatever fields Buildium returns on the lease transaction (`Memo`, `Journal`, `TransactionTypeEnum`). If you cannot positively classify a reversal, leave it counted (do not silently drop everything).
+- Keep a separate count of NSF reversals so they are not lost. Surface them in the drilldown as their own section rather than counting them against accuracy. Deb explicitly wants NSF reversals visible ("I would put that more into a dashboard of what's been reversed and why") even though they should not penalize the metric.
+
+Drilldown update: in `kpiRentProcessing`, split the rows into two groups: "Operational reversals (counted)" and "NSF / bounced rent (not counted, informational)". Update the summary so the percentage reflects only operational reversals over payments, and update the formula note accordingly.
+
+---
+
+## Fix 3 - Vendor Compliance: exclude inactive vendors and prep for a maintenance-only filter
+
+File: `server/lib/aggregator.js`, the vendor compliance block (currently around lines 586-610) plus the `bdVendors` fetch (around line 56) and the `kpiVendorCompliance` drilldown.
+
+Two problems:
+1. Inactive vendors are still appearing even though we fetch with `statuses: ["Active"]`. Jason verified the first vendor in the list is inactive in Buildium.
+2. The list includes non-maintenance payees (7-Eleven, Amazon, American Airlines, Costco, grocery stores). These will never carry a W-9 or insurance, so they tank the compliance percentage. We want to measure only vendors actually used for maintenance.
+
+Required changes:
+
+Inactive filter (do now):
+- Do not rely solely on the `statuses=Active` query param. After fetching `bdVendors`, also filter client-side on the vendor's own active flag. Buildium vendor records carry an active/inactive indicator (check `IsActive`, and any status field on the record). Drop anything not clearly active. Apply this filtered list everywhere `bdVendors` is consumed, including the 1099 metric, so the inactive plumber Jason flagged stops appearing.
+
+Maintenance-only filter (prep now, activate later):
+- We are going to add a custom field in Buildium called "Vendor Type" to tag maintenance vendors. It does not exist yet, so build this to be a no-op until the field is present, then automatically take effect once it is.
+- Add a config flag near the top of the file, for example `const VENDOR_TYPE_FIELD = "Vendor Type";` and `const MAINTENANCE_VENDOR_VALUES = ["Maintenance", "Maintenance Vendor"];` (make the accepted values easy to edit).
+- When computing vendor compliance and 1099 compliance, attempt to read the Vendor Type custom field off each vendor record. Buildium custom fields usually arrive on the vendor object (check for `CustomFields`, `CustomFieldValues`, or a nested `VendorMessage.CustomFields` array of `{Name, Value}` objects, mirroring how the existing code already defensively checks multiple shapes for tax/insurance). Read it defensively across those locations.
+- Behavior: if at least one vendor in the fetched set has a populated Vendor Type, switch the denominator to only vendors whose Vendor Type is in `MAINTENANCE_VENDOR_VALUES`. If NO vendor has the field populated yet (current state), fall back to the existing active-vendor behavior so nothing breaks before the field is created.
+- Add a short comment block documenting that once the Buildium custom field is live and populated, the metric auto-switches to maintenance-only with no further code change.
+
+Drilldown update: in `kpiVendorCompliance`, add a Vendor Type column. Update the summary and note to state whether the metric is currently scoped to maintenance vendors (field detected) or all active vendors (field not yet populated).
+
+---
+
+## Fix 4 - Showing Completion Rate: available listings only, exclude self-showings
+
+File: `server/lib/aggregator.js`, the showings roll-up (currently around lines 448-461) and the `kpiShowingCompletion` / `completionRate` drilldowns. Data comes from RentEngine `unitLeasingPerformance` via `perfByUnit`.
+
+Problem: completion rate reads low (around 35 percent) because it (a) sums showings across every RentEngine unit regardless of listing status, and (b) appears to include self-showings, which tenants frequently cancel or reschedule. Jason confirmed every in-person / accompanied showing gets completed (they do not no-show), so the only completion rate worth measuring is for accompanied/in-person showings on units that are actually available.
+
+Required changes:
+
+Available listings only:
+- The roll-up currently iterates `perfByUnit.values()` across all units. Restrict it to available listings only. Use the existing `reAvailable` set (units whose status is not "Leased"; Deb's words: "I don't want lease status, I want just available"). Iterate over `reAvailable` and pull each unit's perf from `perfByUnit`, instead of summing the full map.
+
+Exclude self-showings:
+- Inspect the RentEngine per-unit leasing-performance payload for fields that separate accompanied/in-person showings from self-showings. Likely field names include something like `accompanied_showings_scheduled` / `accompanied_showings_completed`, `in_person_*`, or `self_showings_*`. If those breakdown fields exist, compute completion from accompanied/in-person only and ignore self-showings entirely.
+- If the payload does NOT break showings down by type, do not guess. Add a one-time `console.log` of the full perf object for a single unit so Meg can see the exact field names available, and leave the calculation on total showings for now with a clear `// TODO` noting the breakdown fields were not found. Flag this in the output so it is not silently wrong.
+
+Drilldown update: in `kpiShowingCompletion` and the `completionRate` drilldown, restrict rows to available units, and if the type breakdown exists, show accompanied scheduled/completed rather than totals. Update the note to say the metric measures accompanied showings on available listings only.
+
+Keep the 95 percent target as-is.
+
+---
+
+## Fix 5 - Date filters: real period options, default to Current Month, stop reverting
+
+Files: `Limehouse Revamp/components/var-a.jsx` (the `RANGES` map, `scaleData`, the `Render` component state, the inline `Header`, and the range banner) and `Limehouse Revamp/components/shared.jsx` (`DashHeader` select options). Apply to every tab (Dashboard, Team Performance, CEO View).
+
+Two problems:
+1. The options are Last 7 / 30 / 90 days / Last 12 months. Jason and Deb want calendar-period options instead, defaulting to Current Month.
+2. The selection keeps reverting to Last 12 months, and the app flips back to the Dashboard tab after a couple of idle minutes. Root cause: a reload/remount drops `tab` and `range` back to their `useState` defaults. Both need to persist.
+
+### 5a. New options and default
+
+Replace the range options in BOTH selectors (`var-a.jsx` inline `Header` and `shared.jsx` `DashHeader`) with exactly:
+- Current Month  (default)
+- Last Month
+- Current Quarter
+- Last Quarter
+- Current Year
+- Last Year
+
+Update `RANGES` in `var-a.jsx` to key off these instead of day counts. Each entry needs a `label`, the `months` weight used by `scaleData`, and the `sliceTail` (number of trailing monthly buckets to show on the charts). Suggested mapping:
+- `currentMonth`: months 1, sliceTail 1, label "Current Month"
+- `lastMonth`: months 1, sliceTail 1, label "Last Month"
+- `currentQuarter`: months 3, sliceTail 3, label "Current Quarter"
+- `lastQuarter`: months 3, sliceTail 3, label "Last Quarter"
+- `currentYear`: months = current month number (Jan=1 ... so YTD weight), sliceTail = current month number, label "Current Year"
+- `lastYear`: months 12, sliceTail 12, label "Last Year"
+
+Change the default everywhere from `'365'` to `'currentMonth'`:
+- `TWEAK_DEFAULTS_A.range` in `app-a.jsx`
+- `useState(tweaks.range || '365')` in `Render` (var-a.jsx) becomes the persisted value described in 5b, falling back to `'currentMonth'`
+- the "Reset to 12 months" button in the range banner becomes "Reset to Current Month" and sets `'currentMonth'`, and its `range !== '365'` guard becomes `range !== 'currentMonth'`
+
+IMPORTANT accuracy caveat to surface to Meg, do not bury it: the current `scaleData` does NOT re-query the API per period. It takes trailing-12-month totals and multiplies cumulative metrics by `months/12`, then slices the monthly arrays. So "Current Month" vs "Last Month" will produce the same estimated number today, and quarter/year are proportional estimates, not true calendar-period figures. This is why Deb saw numbers shift in ways that did not line up.
+- Minimum acceptable for this pass: implement the option/label/default/persistence changes above so the UI matches what they asked for, and add a visible note in the range banner that figures are estimated for the selected period.
+- Better, if scoped in: add real server-side date windowing. Accept a `period` query param on `/api/dashboard`, translate it to concrete start/end dates server-side, and have `buildDashboard` query Buildium/RentEngine for that window (cumulative metrics, reversals, showings, recon months) instead of always trailing 12 months. Flag this clearly as the larger change so Meg can decide whether to do it now.
+
+### 5b. Persist tab and range so they survive a reload/remount
+
+The app already uses `sessionStorage` for the CEO unlock, so reuse that pattern.
+
+In `Render` (var-a.jsx):
+- Initialize range from storage: `const [range, setRange] = useState(() => sessionStorage.getItem('limehouse_range') || tweaks.range || 'currentMonth');`
+- Initialize tab from storage: `const [tab, setTab] = useState(() => sessionStorage.getItem('limehouse_tab') || 'dashboard');`
+- Persist on change: add `useEffect(() => { sessionStorage.setItem('limehouse_range', range); }, [range]);` and the same for `tab`. Or write to storage inside the existing `setRange`/`setTab` call sites; either is fine, just make both persist.
+
+This directly fixes both "it keeps defaulting back to Last 12 months" and "it flips back to the Dashboard tab" since a reload/remount now restores the last selection instead of falling back to defaults.
+
+Note for Meg: this masks the underlying reload (likely the Replit webview reloading the iframe on idle). If you want to also stop the reload itself, that is a separate investigation into the embedding/iframe, out of scope here.
+
+---
+
+## After making changes
+
+- Run a sync and spot-check each of the five metrics against Buildium / RentEngine for one known property (Deb used 2421 Arkansas Ave for showings).
+- For Fix 3, confirm the inactive plumber Jason flagged no longer appears.
+- For Fix 4, paste the logged RentEngine perf object field names back so we can confirm whether the accompanied/self breakdown exists.
+- Confirm the filter now defaults to Current Month and survives a page reload on all three tabs.

@@ -5,7 +5,7 @@ const TWEAK_DEFAULTS_A = /*EDITMODE-BEGIN*/{
   "frame": "responsive",
   "yoyMode": true,
   "sourcePills": true,
-  "range": "365"
+  "range": "currentMonth"
 }/*EDITMODE-END*/;
 
 function StandaloneApp() {

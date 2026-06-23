@@ -345,10 +345,12 @@ function DashHeader({ syncedAt, range, onRangeChange, dense, mobile }) {
           backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 4l3 3 3-3' stroke='%236b7566' stroke-width='1.2' fill='none' stroke-linecap='round'/></svg>\")",
           backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center',
         }}>
-          <option value="30">Last 30 days</option>
-          <option value="90">Last 90 days</option>
-          <option value="365">Last year</option>
-          <option value="ytd">Year to date</option>
+          <option value="currentMonth">This month</option>
+          <option value="lastMonth">Last month</option>
+          <option value="currentQuarter">This quarter</option>
+          <option value="lastQuarter">Last quarter</option>
+          <option value="currentYear">This year</option>
+          <option value="lastYear">Last year</option>
         </select>
         <button style={{
           background: '#3d8c1f', color: 'white', border: 'none',

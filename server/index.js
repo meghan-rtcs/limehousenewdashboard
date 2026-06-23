@@ -3,7 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { getDb, query as dbQuery, run as dbRun, queryOne as dbQueryOne } from "./lib/db.js";
 import { syncAll, testGL } from "./lib/sync.js";
-import { buildDashboard } from "./lib/aggregator.js";
+import { buildDashboard, periodToWindow, PERIOD_KEYS } from "./lib/aggregator.js";
 import { startScheduler, runSync, runLeadSimpleSync, setPostSyncHook } from "./lib/scheduler.js";
 import { buildium } from "./lib/buildium.js";
 import { getBundle, warmBundle } from "./lib/bundle.js";
@@ -23,61 +23,80 @@ app.use((req, res, next) => { res.setHeader("Cache-Control", "no-store"); next()
 app.use(express.json());
 
 // ── Dashboard data ───────────────────────────────────────────────────────────
-let cachedPayload = null;
-let cachedAt = null;
-let building = false;
-let rebuildPending = false;
+// One cache entry per reporting period (currentMonth, lastMonth, …). The
+// default period is built at startup; the rest are built lazily on first
+// request and refreshed in the background when stale (10-min TTL).
+const DEFAULT_PERIOD = "currentMonth";
+const TTL_MS = 600000;
+const periodCache = new Map(); // periodKey -> { payload, builtAt, building, rebuildPending }
 
-async function refreshDashboard() {
-  // If a build is already running, mark that another rebuild is needed and
-  // return. The in-flight build will re-run once on completion so a refresh
-  // requested mid-build (e.g. two scheduled syncs finishing back-to-back) still
-  // picks up the latest DB state instead of being silently dropped.
-  if (building) {
-    rebuildPending = true;
+function getEntry(period) {
+  let e = periodCache.get(period);
+  if (!e) {
+    e = { payload: null, builtAt: null, building: false, rebuildPending: false };
+    periodCache.set(period, e);
+  }
+  return e;
+}
+
+async function refreshDashboard(period = DEFAULT_PERIOD) {
+  const e = getEntry(period);
+  // If a build is already running for this period, mark that another rebuild is
+  // needed and return. The in-flight build re-runs once on completion so a
+  // refresh requested mid-build still picks up the latest DB state.
+  if (e.building) {
+    e.rebuildPending = true;
     return;
   }
-  building = true;
+  e.building = true;
   try {
     do {
-      rebuildPending = false;
-      cachedPayload = await buildDashboard();
-      cachedAt = Date.now();
-      persistDashboard(cachedPayload, cachedAt);
-      console.log(`[server] Dashboard built at ${new Date(cachedAt).toISOString()}`);
-    } while (rebuildPending);
+      e.rebuildPending = false;
+      e.payload = await buildDashboard(periodToWindow(period, new Date()));
+      e.builtAt = Date.now();
+      persistDashboard(period, e.payload, e.builtAt);
+      console.log(`[server] Dashboard (${period}) built at ${new Date(e.builtAt).toISOString()}`);
+    } while (e.rebuildPending);
   } catch (err) {
-    console.error("[server] Dashboard build error:", err);
+    console.error(`[server] Dashboard build error (${period}):`, err);
   } finally {
-    building = false;
+    e.building = false;
   }
+}
+
+// Rebuild every period currently in the cache (used after a sync). Always
+// includes the default period even if it hasn't been requested yet.
+async function refreshAllDashboards() {
+  const periods = new Set([DEFAULT_PERIOD, ...periodCache.keys()]);
+  for (const p of periods) await refreshDashboard(p);
 }
 
 // Persist the freshly-built payload so the next cold start can serve it
 // immediately. Best-effort: a persistence failure must never break a build.
-function persistDashboard(payload, builtAt) {
+function persistDashboard(period, payload, builtAt) {
   try {
     dbRun(
-      `INSERT INTO app_cache (key, value, updated_at) VALUES ('dashboard', ?, ?)
+      `INSERT INTO app_cache (key, value, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-      [JSON.stringify({ payload, builtAt }), new Date(builtAt).toISOString()]
+      [`dashboard:${period}`, JSON.stringify({ payload, builtAt }), new Date(builtAt).toISOString()]
     );
   } catch (e) {
     console.error("[server] persist dashboard failed:", e.message);
   }
 }
 
-// Load the last persisted payload into memory so /api/dashboard answers
-// instantly on startup. Returns true if a snapshot was loaded.
-function loadPersistedDashboard() {
+// Load the last persisted payload for a period into memory so /api/dashboard
+// answers instantly on startup. Returns true if a snapshot was loaded.
+function loadPersistedDashboard(period = DEFAULT_PERIOD) {
   try {
-    const row = dbQueryOne("SELECT value FROM app_cache WHERE key = 'dashboard'");
+    const row = dbQueryOne("SELECT value FROM app_cache WHERE key = ?", [`dashboard:${period}`]);
     if (!row?.value) return false;
     const parsed = JSON.parse(row.value);
     if (parsed?.payload) {
-      cachedPayload = parsed.payload;
-      cachedAt = parsed.builtAt || Date.now();
-      console.log(`[server] Loaded persisted dashboard from ${new Date(cachedAt).toISOString()}`);
+      const e = getEntry(period);
+      e.payload = parsed.payload;
+      e.builtAt = parsed.builtAt || Date.now();
+      console.log(`[server] Loaded persisted dashboard (${period}) from ${new Date(e.builtAt).toISOString()}`);
       return true;
     }
   } catch (e) {
@@ -86,24 +105,27 @@ function loadPersistedDashboard() {
   return false;
 }
 
-// Let scheduled syncs (Buildium + overnight LeadSimple) rebuild the served
-// dashboard cache once their DB writes complete.
-setPostSyncHook(refreshDashboard);
+// Let scheduled syncs (Buildium + overnight LeadSimple) rebuild every cached
+// dashboard period once their DB writes complete.
+setPostSyncHook(refreshAllDashboards);
 
 app.get("/api/dashboard", async (req, res) => {
-  if (!cachedPayload) {
-    // Try to build from DB data if available
-    try {
-      await refreshDashboard();
-    } catch (e) { /* ignore */ }
+  const period = PERIOD_KEYS.includes(req.query.period) ? req.query.period : DEFAULT_PERIOD;
+  const e = getEntry(period);
+  if (!e.payload) {
+    // First request for this period: build it synchronously from DB data.
+    try { await refreshDashboard(period); } catch (err) { /* ignore */ }
+  } else if (e.builtAt && Date.now() - e.builtAt > TTL_MS && !e.building) {
+    // Stale: serve the existing payload now, refresh in the background.
+    refreshDashboard(period);
   }
-  if (!cachedPayload) {
-    res.status(503).json({ error: "Data not yet loaded. Run a sync first.", fetching: building });
+  if (!e.payload) {
+    res.status(503).json({ error: "Data not yet loaded. Run a sync first.", fetching: e.building });
     return;
   }
   res.json({
-    ...cachedPayload,
-    sync: { fetchedAt: cachedAt, isStale: cachedAt ? Date.now() - cachedAt > 600000 : true },
+    ...e.payload,
+    sync: { fetchedAt: e.builtAt, isStale: e.builtAt ? Date.now() - e.builtAt > TTL_MS : true },
   });
 });
 
@@ -111,8 +133,8 @@ app.get("/api/dashboard", async (req, res) => {
 app.post("/api/sync", async (req, res) => {
   try {
     const result = await syncAll("manual");
-    // Rebuild dashboard after sync
-    await refreshDashboard();
+    // Rebuild every cached dashboard period after sync
+    await refreshAllDashboards();
     res.json({ ok: result.ok, errors: result.errors, records: result.totalRecords });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -145,9 +167,11 @@ app.get("/api/sync-status", (req, res) => {
     const lastSync = dbQuery("SELECT * FROM sync_log ORDER BY id DESC LIMIT 1")[0];
     const entryCount = dbQuery("SELECT COUNT(*) as c FROM gl_entries")[0]?.c || 0;
     const unitCount = dbQuery("SELECT COUNT(*) as c FROM units")[0]?.c || 0;
-    res.json({ lastSync, glEntries: entryCount, units: unitCount, dashboardCachedAt: cachedAt, dashboardBuilding: building });
+    const e = getEntry(DEFAULT_PERIOD);
+    res.json({ lastSync, glEntries: entryCount, units: unitCount, dashboardCachedAt: e.builtAt, dashboardBuilding: e.building });
   } catch (err) {
-    res.json({ error: err.message, dashboardCachedAt: cachedAt, dashboardBuilding: building });
+    const e = getEntry(DEFAULT_PERIOD);
+    res.json({ error: err.message, dashboardCachedAt: e.builtAt, dashboardBuilding: e.building });
   }
 });
 
@@ -350,18 +374,18 @@ app.listen(PORT, "0.0.0.0", async () => {
   // near-instant, then refresh from live sources in the background. Building
   // the dashboard makes hundreds of live API calls (~80s), so we never block
   // startup or the first request on it when we already have a prior snapshot.
-  const haveSnapshot = loadPersistedDashboard();
+  const haveSnapshot = loadPersistedDashboard(DEFAULT_PERIOD);
 
   (async () => {
     console.log(`[server] Starting initial sync in background${haveSnapshot ? " (serving cached snapshot meanwhile)" : ""}...`);
     try {
       await syncAll("full");
-      await refreshDashboard();
+      await refreshDashboard(DEFAULT_PERIOD);
       console.log("[server] Initial sync and dashboard build complete");
     } catch (err) {
       console.error("[server] Initial sync failed:", err.message);
       // Try to build dashboard from whatever data is in DB
-      try { await refreshDashboard(); } catch (e) { /* ignore */ }
+      try { await refreshDashboard(DEFAULT_PERIOD); } catch (e) { /* ignore */ }
     }
   })();
 });
