@@ -14,24 +14,23 @@ const NEGATE_INCOME = false;
 const NEGATE_EXPENSE = false;
 
 // ── VENDOR COMPLIANCE SCOPE ──────────────────────────────────────────────────
-// "Vendor Type" is a Buildium custom field we plan to add to tag maintenance
-// vendors. It does not exist yet, so the maintenance-only filter below is a
-// no-op until at least one vendor has it populated, at which point the metric
-// AUTOMATICALLY switches to maintenance-only with no further code change.
-// Edit MAINTENANCE_VENDOR_VALUES to match whatever values get used in Buildium.
-const VENDOR_TYPE_FIELD = "Vendor Type";
-const MAINTENANCE_VENDOR_VALUES = ["Maintenance", "Maintenance Vendor"];
-function readVendorType(v) {
-  const arrays = [v.CustomFields, v.CustomFieldValues, v.VendorMessage?.CustomFields].filter(Array.isArray);
-  for (const arr of arrays) {
-    const hit = arr.find(f => (f?.Name || f?.FieldName || "").trim().toLowerCase() === VENDOR_TYPE_FIELD.toLowerCase());
-    if (hit) return String(hit.Value ?? hit.FieldValue ?? "").trim();
-  }
-  return "";
+// Maintenance/trade vendors are identified by Buildium's built-in vendor
+// "Category" field (v.Category.Name). In this account every trade is filed under
+// a "Contractor(s) - <trade>" category (Plumbing, HVAC, Electrical, Roofing,
+// Landscaping, Cleaning, Flooring, Pest, etc.) plus "Contractor - RE Contractor
+// (1099 Work)". Non-service expense vendors (Restaurants, Gas Stations, Travel,
+// Suppliers, Software, etc.) are excluded — they don't need insurance/W-9
+// compliance. Matching on the "contractor" prefix captures both the plural and
+// singular spellings. Adjust MAINTENANCE_CATEGORY_PREFIXES to widen/narrow scope.
+// If no vendor matches (e.g. categories not populated), we fall back to all
+// active vendors so the metric never silently empties out.
+const MAINTENANCE_CATEGORY_PREFIXES = ["contractor"];
+function readVendorCategory(v) {
+  return String(v?.Category?.Name ?? "").trim();
 }
 function isMaintenanceVendor(v) {
-  const t = readVendorType(v).toLowerCase();
-  return MAINTENANCE_VENDOR_VALUES.some(m => m.toLowerCase() === t);
+  const c = readVendorCategory(v).toLowerCase();
+  return MAINTENANCE_CATEGORY_PREFIXES.some(p => c.startsWith(p));
 }
 
 function pct(n, d) { return d ? Math.round((n / d) * 1000) / 10 : 0; }
@@ -735,16 +734,18 @@ export async function buildDashboard(win) {
   let vendorCompliancePct = null;
   let vendor1099Pct = null;
   // Buildium's ?statuses=Active query is unreliable (it returns inactive vendors),
-  // so re-filter on each record's own IsActive flag. Then, if the "Vendor Type"
-  // custom field is populated on any vendor, scope the metric to maintenance
-  // vendors only. Until that field exists this is a no-op (falls back to all
-  // active vendors) — see VENDOR_TYPE_FIELD / readVendorType near the top.
+  // so re-filter on each record's own IsActive flag. Then scope to maintenance/
+  // trade vendors using the built-in vendor Category field (see
+  // MAINTENANCE_CATEGORY_PREFIXES near the top). If no active vendor matches a
+  // maintenance category, fall back to all active vendors so the metric never
+  // silently empties out.
   const activeVendors = (bdVendors || []).filter(v => v.IsActive !== false);
-  const anyVendorTyped = activeVendors.some(v => readVendorType(v));
-  const scopedVendors = anyVendorTyped ? activeVendors.filter(isMaintenanceVendor) : activeVendors;
-  const vendorScopeLabel = anyVendorTyped
-    ? "maintenance vendors (Vendor Type field detected)"
-    : "all active vendors (Vendor Type field not yet populated)";
+  const maintenanceVendors = activeVendors.filter(isMaintenanceVendor);
+  const usingMaintenanceScope = maintenanceVendors.length > 0;
+  const scopedVendors = usingMaintenanceScope ? maintenanceVendors : activeVendors;
+  const vendorScopeLabel = usingMaintenanceScope
+    ? "maintenance/trade vendors (Category starts with \"Contractor\")"
+    : "all active vendors (no maintenance categories found)";
   if (scopedVendors.length) {
     const compliant = scopedVendors.filter(v => {
       const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
@@ -1126,7 +1127,7 @@ export async function buildDashboard(win) {
         const name = v.CompanyName || `${v.FirstName || ""} ${v.LastName || ""}`.trim() || `#${v.Id}`;
         return {
           name,
-          vendorType: readVendorType(v) || "—",
+          category: readVendorCategory(v) || "—",
           hasTax, expDate: expDate ? expDate.slice(0, 10) : "—", insOk, compliant,
           status: compliant ? "compliant" : reasons.join(" + "),
         };
@@ -1135,10 +1136,10 @@ export async function buildDashboard(win) {
       const okCount = rows.filter(r => r.compliant).length;
       return {
         title: "Vendor Compliance",
-        cols: ["Vendor", "Vendor Type", "TaxPayerId", "Insurance Expires", "Status"],
-        rows: rows.map(r => [r.name, r.vendorType, r.hasTax ? "yes" : "no", r.expDate, r.status]),
+        cols: ["Vendor", "Category", "TaxPayerId", "Insurance Expires", "Status"],
+        rows: rows.map(r => [r.name, r.category, r.hasTax ? "yes" : "no", r.expDate, r.status]),
         summary: `${okCount} compliant ÷ ${rows.length} ${vendorScopeLabel} = ${vendorCompliancePct ?? "—"}% · target 100%`,
-        note: `Scope: ${vendorScopeLabel}. Buildium's ?statuses=Active filter is unreliable so vendors are re-filtered on each record's own IsActive flag (inactive vendors dropped). If a "Vendor Type" custom field is populated on any vendor, the metric automatically narrows to maintenance vendors only; until then it covers all active vendors. Formula: scoped vendors where TaxPayerId is populated AND VendorInsurance.ExpirationDate > today, ÷ total scoped vendors. Source: Buildium /v1/vendors, reading IsActive, CustomFields ("Vendor Type"), TaxInformation.TaxPayerId and VendorInsurance.ExpirationDate.`,
+        note: `Scope: ${vendorScopeLabel}. Buildium's ?statuses=Active filter is unreliable so vendors are re-filtered on each record's own IsActive flag (inactive vendors dropped). Maintenance/trade vendors are identified by the built-in vendor Category field (names starting with "Contractor", e.g. Contractors - Plumbing/HVAC/Electrical/Roofing); non-service expense categories (Restaurants, Gas Stations, Suppliers, Travel, etc.) are excluded. If no maintenance categories are found, the metric falls back to all active vendors. Formula: scoped vendors where TaxPayerId is populated AND VendorInsurance.ExpirationDate > today, ÷ total scoped vendors. Source: Buildium /v1/vendors, reading IsActive, Category.Name, TaxInformation.TaxPayerId and VendorInsurance.ExpirationDate.`,
       };
     })(),
     kpi1099Compliance: (() => {
@@ -1150,16 +1151,16 @@ export async function buildDashboard(win) {
         const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
         const name = v.CompanyName || `${v.FirstName || ""} ${v.LastName || ""}`.trim() || `#${v.Id}`;
         const taxType = tax?.TaxPayerIdType || "—";
-        return { name, vendorType: readVendorType(v) || "—", hasTax, taxType, status: hasTax ? "compliant" : "missing TaxPayerId" };
+        return { name, category: readVendorCategory(v) || "—", hasTax, taxType, status: hasTax ? "compliant" : "missing TaxPayerId" };
       });
       rows.sort((a, b) => Number(a.hasTax) - Number(b.hasTax) || a.name.localeCompare(b.name));
       const okCount = rows.filter(r => r.hasTax).length;
       return {
         title: "1099 Compliance",
-        cols: ["Vendor", "Vendor Type", "Tax ID Type", "TaxPayerId", "Status"],
-        rows: rows.map(r => [r.name, r.vendorType, r.taxType, r.hasTax ? "yes" : "no", r.status]),
+        cols: ["Vendor", "Category", "Tax ID Type", "TaxPayerId", "Status"],
+        rows: rows.map(r => [r.name, r.category, r.taxType, r.hasTax ? "yes" : "no", r.status]),
         summary: `${okCount} with TaxPayerId ÷ ${rows.length} flagged IncludeIn1099 = ${vendor1099Pct ?? "—"}% · target 100% by Jan`,
-        note: `Scope: ${vendorScopeLabel}. Formula: scoped vendors where IncludeIn1099 is true AND TaxPayerId is populated, ÷ scoped vendors where IncludeIn1099 is true. Source: Buildium /v1/vendors (IsActive + "Vendor Type" custom field), reading TaxInformation.IncludeIn1099 and TaxInformation.TaxPayerId.`,
+        note: `Scope: ${vendorScopeLabel}. Formula: scoped vendors where IncludeIn1099 is true AND TaxPayerId is populated, ÷ scoped vendors where IncludeIn1099 is true. Source: Buildium /v1/vendors (IsActive + Category.Name), reading TaxInformation.IncludeIn1099 and TaxInformation.TaxPayerId.`,
       };
     })(),
   };
