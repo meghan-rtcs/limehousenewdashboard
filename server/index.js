@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { getDb, query as dbQuery, run as dbRun, queryOne as dbQueryOne } from "./lib/db.js";
 import { syncAll, testGL } from "./lib/sync.js";
@@ -21,6 +22,107 @@ const app = express();
 app.disable("etag");
 app.use((req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
+// ── Password protection ──────────────────────────────────────────────────────
+// Single shared password (env DASHBOARD_PASSWORD) gates the whole dashboard.
+// Cookie-session login page rather than HTTP Basic Auth because the Replit
+// preview runs in a cross-site iframe where native Basic Auth prompts are
+// blocked. The session cookie is SameSite=None; Secure so it is sent inside
+// that cross-site iframe. The cookie stores an HMAC of a fixed string keyed by
+// the password — never the password itself.
+const AUTH_PASSWORD = process.env.DASHBOARD_PASSWORD || "";
+const AUTH_COOKIE = "limehouse_auth";
+const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days (seconds)
+
+function authToken() {
+  return crypto.createHmac("sha256", AUTH_PASSWORD || "unset")
+    .update("limehouse-session-v1").digest("hex");
+}
+function parseCookies(header) {
+  const out = {};
+  (header || "").split(";").forEach((part) => {
+    const i = part.indexOf("=");
+    if (i > -1) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  });
+  return out;
+}
+function timingSafeEqual(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+function isAuthed(req) {
+  if (!AUTH_PASSWORD) return true; // not configured → fail open to avoid lockout
+  const cookies = parseCookies(req.headers.cookie);
+  return cookies[AUTH_COOKIE] ? timingSafeEqual(cookies[AUTH_COOKIE], authToken()) : false;
+}
+
+function loginPage(showError) {
+  return `<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Limehouse · Sign in</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: #f4f6f1; color: #1c2119; }
+  .card { width: 100%; max-width: 360px; background: #fff; border: 1px solid #e2e6dc;
+    border-radius: 14px; padding: 32px 28px; box-shadow: 0 8px 30px rgba(28,33,25,.06); }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 22px; color: #6a766a; font-size: 13px; }
+  label { display: block; font-size: 12px; font-weight: 600; color: #44503f; margin-bottom: 6px; }
+  input { width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #ccd3c6;
+    border-radius: 9px; outline: none; background: #fbfcfa; }
+  input:focus { border-color: #6f8f5f; box-shadow: 0 0 0 3px rgba(111,143,95,.18); }
+  button { width: 100%; margin-top: 18px; padding: 11px 12px; font-size: 15px; font-weight: 600;
+    color: #fff; background: #4f6b3f; border: 0; border-radius: 9px; cursor: pointer; }
+  button:hover { background: #44602f; }
+  .err { margin-top: 14px; font-size: 13px; color: #a3331f; background: #fbeae6;
+    border: 1px solid #f0c8bf; border-radius: 8px; padding: 8px 11px; }
+</style></head><body>
+  <form class="card" method="POST" action="/login">
+    <h1>Limehouse Dashboard</h1>
+    <p class="sub">Enter the password to continue.</p>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" autofocus required>
+    ${showError ? `<div class="err">Incorrect password. Please try again.</div>` : ""}
+    <button type="submit">Sign in</button>
+  </form>
+</body></html>`;
+}
+
+app.get("/login", (req, res) => {
+  if (isAuthed(req)) return res.redirect("/");
+  res.type("html").send(loginPage(false));
+});
+app.post("/login", (req, res) => {
+  const pw = (req.body && req.body.password) || "";
+  if (AUTH_PASSWORD && timingSafeEqual(pw, AUTH_PASSWORD)) {
+    res.setHeader("Set-Cookie",
+      `${AUTH_COOKIE}=${authToken()}; HttpOnly; Path=/; Max-Age=${SESSION_MAX_AGE}; SameSite=None; Secure`);
+    return res.redirect("/");
+  }
+  res.status(401).type("html").send(loginPage(true));
+});
+app.post("/logout", (req, res) => {
+  res.setHeader("Set-Cookie", `${AUTH_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=None; Secure`);
+  res.redirect("/login");
+});
+
+// Gate everything below this point.
+app.use((req, res, next) => {
+  if (isAuthed(req)) return next();
+  if (req.path.startsWith("/api/")) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  res.redirect("/login");
+});
+if (!AUTH_PASSWORD) {
+  console.warn("[server] DASHBOARD_PASSWORD is not set — dashboard is UNPROTECTED. Set the secret to enable the login gate.");
+}
 
 // ── Dashboard data ───────────────────────────────────────────────────────────
 // One cache entry per reporting period (currentMonth, lastMonth, …). The
