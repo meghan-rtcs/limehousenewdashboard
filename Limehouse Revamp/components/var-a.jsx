@@ -68,7 +68,7 @@ const VarA = (function() {
               if (syncing) return;
               setSyncing(true);
               try {
-                await fetch('/api/sync', { method: 'POST' });
+                await fetch('/api/sync', { method: 'POST', headers: { 'X-Requested-With': 'LimehouseDashboard' } });
               } catch (e) { /* ignore */ }
               window.location.reload();
             }}

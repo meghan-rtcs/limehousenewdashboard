@@ -54,9 +54,17 @@ function timingSafeEqual(a, b) {
   return crypto.timingSafeEqual(ab, bb);
 }
 function isAuthed(req) {
-  if (!AUTH_PASSWORD) return true; // not configured → fail open to avoid lockout
+  if (!AUTH_PASSWORD) return false; // not configured → fail closed (deny) rather than expose data
   const cookies = parseCookies(req.headers.cookie);
   return cookies[AUTH_COOKIE] ? timingSafeEqual(cookies[AUTH_COOKIE], authToken()) : false;
+}
+
+// CSRF defense for state-changing requests. The session cookie is SameSite=None
+// (required for the cross-site preview iframe), so a custom header is required
+// on mutating requests: a cross-origin attacker cannot set custom headers
+// without triggering a CORS preflight, which this server never approves.
+function csrfOk(req) {
+  return req.get("X-Requested-With") === "LimehouseDashboard";
 }
 
 function loginPage(showError) {
@@ -86,6 +94,7 @@ function loginPage(showError) {
   <form class="card" method="POST" action="/login">
     <h1>Limehouse Dashboard</h1>
     <p class="sub">Enter the password to continue.</p>
+    <input type="text" name="username" autocomplete="username" value="limehouse" hidden aria-hidden="true">
     <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="current-password" autofocus required>
     ${showError ? `<div class="err">Incorrect password. Please try again.</div>` : ""}
@@ -94,17 +103,36 @@ function loginPage(showError) {
 </body></html>`;
 }
 
+// Lightweight in-memory login throttle: max 10 failed attempts per IP per
+// 15-minute window. Successful logins reset the counter.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILS = 10;
+const loginAttempts = new Map(); // ip -> { count, resetAt }
+function loginThrottle(ip) {
+  const now = Date.now();
+  let rec = loginAttempts.get(ip);
+  if (!rec || now > rec.resetAt) { rec = { count: 0, resetAt: now + LOGIN_WINDOW_MS }; loginAttempts.set(ip, rec); }
+  return rec;
+}
+
 app.get("/login", (req, res) => {
   if (isAuthed(req)) return res.redirect("/");
   res.type("html").send(loginPage(false));
 });
 app.post("/login", (req, res) => {
+  const ip = req.ip || req.socket?.remoteAddress || "unknown";
+  const rec = loginThrottle(ip);
+  if (rec.count >= LOGIN_MAX_FAILS) {
+    return res.status(429).type("html").send(loginPage(true));
+  }
   const pw = (req.body && req.body.password) || "";
   if (AUTH_PASSWORD && timingSafeEqual(pw, AUTH_PASSWORD)) {
+    loginAttempts.delete(ip);
     res.setHeader("Set-Cookie",
       `${AUTH_COOKIE}=${authToken()}; HttpOnly; Path=/; Max-Age=${SESSION_MAX_AGE}; SameSite=None; Secure`);
     return res.redirect("/");
   }
+  rec.count++;
   res.status(401).type("html").send(loginPage(true));
 });
 app.post("/logout", (req, res) => {
@@ -233,6 +261,7 @@ app.get("/api/dashboard", async (req, res) => {
 
 // ── Sync trigger ─────────────────────────────────────────────────────────────
 app.post("/api/sync", async (req, res) => {
+  if (!csrfOk(req)) return res.status(403).json({ error: "Forbidden" });
   try {
     const result = await syncAll("manual");
     // Rebuild every cached dashboard period after sync
@@ -248,6 +277,7 @@ app.post("/api/sync", async (req, res) => {
 // itself around LeadSimple's per-window record rate limit (can take several
 // minutes), persists to SQLite, and the dashboard reads the last snapshot.
 app.post("/api/sync-leadsimple", (req, res) => {
+  if (!csrfOk(req)) return res.status(403).json({ error: "Forbidden" });
   runLeadSimpleSync(); // fire-and-forget; guarded against concurrent runs
   res.json({ ok: true, started: true, note: "LeadSimple sync started in background; this can take several minutes due to rate limits." });
 });

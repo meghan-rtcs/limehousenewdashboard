@@ -9,4 +9,5 @@
 - [Dashboard cold-start persistence](dashboard-cold-start.md) — buildDashboard() is slow (hundreds of live API calls + RE 429s); persist last payload to app_cache and serve it instantly on startup, rebuild in background.
 - [Dashboard period windowing](dashboard-period-windowing.md) — flow metrics honor the selected period [start,end]; structural metrics stay as-of-today; renewals/RPU/YoY income keep their own fixed windows — don't re-window them.
 - [Vendor compliance scope](vendor-compliance-scope.md) — maintenance vendors = Buildium Category.Name starting "Contractor" (real field, ~54 vendors); the old "Vendor Type" custom field never existed.
+- [Dashboard password protection](dashboard-auth.md) — single-password cookie login gate; cookie MUST be SameSite=None;Secure for the cross-site preview iframe; mutating POSTs need an X-Requested-With CSRF header.
 - [RentEngine showings method](rentengine-showings-method.md) — showingMethodsAvailable is availability config, not per-showing records; completion report has no method dimension, so accompanied-vs-self-guided cannot be measured.

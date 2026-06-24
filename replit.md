@@ -69,8 +69,18 @@ Required (already configured):
 - `BUILDIUM_CLIENT_ID`
 - `BUILDIUM_CLIENT_SECRET`
 - `RENTENGINE_API_TOKEN`
+- `DASHBOARD_PASSWORD` — single shared password that gates the whole dashboard (see Authentication below)
 
 Postgres env vars (`DATABASE_URL`, `PG*`) are present but unused by this app.
+
+## Authentication
+
+The entire dashboard is behind a single shared password (`DASHBOARD_PASSWORD`). Implemented in `server/index.js` as a cookie-session login page (`GET/POST /login`, `POST /logout`), not HTTP Basic Auth — the Replit preview is a cross-site iframe where native Basic Auth prompts are blocked and `SameSite=Lax` cookies aren't sent.
+
+- Session cookie `limehouse_auth` = HMAC-SHA256 of a fixed string keyed by the password (never the password itself), set `HttpOnly; SameSite=None; Secure; Max-Age=30d`. Changing the password invalidates all sessions.
+- An auth-gate middleware is registered after the `/login`/`/logout` routes and before all data/api/static/debug routes: it redirects HTML requests to `/login` and returns `401` JSON for `/api/*`. Fail-closed: if `DASHBOARD_PASSWORD` is unset, everything is denied.
+- CSRF: mutating POST routes (`/api/sync`, `/api/sync-leadsimple`) require header `X-Requested-With: LimehouseDashboard` (the frontend Sync button sends it). New mutating endpoints must add the same check.
+- Login attempts are throttled to 10 failures per IP per 15 minutes.
 
 ## Workflow
 
