@@ -149,7 +149,7 @@ app.use((req, res, next) => {
   res.redirect("/login");
 });
 if (!AUTH_PASSWORD) {
-  console.warn("[server] DASHBOARD_PASSWORD is not set — dashboard is UNPROTECTED. Set the secret to enable the login gate.");
+  console.warn("[server] DASHBOARD_PASSWORD is not set — login gate is fail-closed, so ALL routes are denied until the secret is set.");
 }
 
 // ── Dashboard data ───────────────────────────────────────────────────────────
