@@ -7,6 +7,7 @@ import { syncAll, testGL } from "./lib/sync.js";
 import { buildDashboard, periodToWindow, PERIOD_KEYS } from "./lib/aggregator.js";
 import { startScheduler, runSync, runLeadSimpleSync, setPostSyncHook } from "./lib/scheduler.js";
 import { buildium } from "./lib/buildium.js";
+import { rentengine } from "./lib/rentengine.js";
 import { getBundle, warmBundle } from "./lib/bundle.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -464,6 +465,136 @@ app.get("/debug/buildium-users", async (req, res) => {
     res.send(html);
   } catch (err) {
     res.status(500).send(`<pre style="color:#b00;font:13px/1.4 monospace;padding:20px">Error: ${esc(err.message)}\n\n${esc(err.stack || "")}</pre>`);
+  }
+});
+
+// ── Debug: RentEngine showings field discovery ───────────────────────────────
+// Temporary route. Hit /debug/re-showings to see real field names and distinct
+// values for showing_method and status across the last 30 days.
+app.get("/debug/re-showings", async (req, res) => {
+  try {
+    const end = new Date().toISOString().slice(0, 10);
+    const start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    const rows = await rentengine.listShowings({ start, end });
+
+    if (rows.length > 0) {
+      console.log("[debug/re-showings] first row:\n", JSON.stringify(rows[0], null, 2));
+    } else {
+      console.log("[debug/re-showings] no rows returned for", start, "→", end);
+    }
+
+    // Collect distinct values for any field that could be showing method or status.
+    // We don't know the exact field names yet, so gather everything scalar.
+    const distinct = {};
+    for (const r of rows) {
+      for (const [k, v] of Object.entries(r)) {
+        if (v === null || typeof v === "object") continue;
+        if (!distinct[k]) distinct[k] = new Set();
+        distinct[k].add(String(v));
+      }
+    }
+
+    // Pull out the fields we most care about for the console summary.
+    const methodKey = Object.keys(distinct).find(k => /method|type/i.test(k));
+    const statusKey = Object.keys(distinct).find(k => /status/i.test(k));
+    console.log("[debug/re-showings] total rows:", rows.length);
+    console.log("[debug/re-showings] all scalar field names:", Object.keys(distinct));
+    if (methodKey) console.log(`[debug/re-showings] distinct ${methodKey}:`, [...distinct[methodKey]]);
+    if (statusKey) console.log(`[debug/re-showings] distinct ${statusKey}:`, [...distinct[statusKey]]);
+
+    res.json({
+      period: { start, end },
+      total: rows.length,
+      firstRow: rows[0] ?? null,
+      distinctValuesByField: Object.fromEntries(
+        Object.entries(distinct).map(([k, s]) => [k, [...s].sort()])
+      ),
+    });
+  } catch (err) {
+    console.error("[debug/re-showings] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Debug: RentEngine showings field discovery (temporary) ──────────────────
+app.get("/debug/showings", async (req, res) => {
+  try {
+    const end   = new Date().toISOString().slice(0, 10);
+    const start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    // Step 1 — fetch one unit to discover which field holds the account id.
+    const unitsResult = await rentengine.raw("/units", { limit: 1 });
+    const firstUnit = Array.isArray(unitsResult)
+      ? unitsResult[0]
+      : Array.isArray(unitsResult?.data)
+        ? unitsResult.data[0]
+        : unitsResult;
+
+    // Step 2 — try the three most likely field paths for the account id.
+    const accountId =
+      firstUnit?.account_id ??
+      firstUnit?.accountId ??
+      firstUnit?.account?.id ??
+      null;
+
+    let showingsResult = null;
+    let showingsError  = null;
+    if (accountId != null) {
+      try {
+        showingsResult = await rentengine.raw("/reporting/showings", {
+          account_ids: accountId,
+          start: new Date(start).toISOString(),
+          end: new Date(end).toISOString(),
+          limit: 100,
+        });
+      } catch (e) {
+        showingsError = e.message;
+      }
+    }
+
+    const rows = Array.isArray(showingsResult)
+      ? showingsResult
+      : Array.isArray(showingsResult?.data)
+        ? showingsResult.data
+        : showingsResult != null
+          ? [showingsResult]
+          : [];
+
+    // Step 3 — distinct values for every field whose name contains
+    // "method", "status", "type", or "result" (case-insensitive).
+    const interestingKeys = /method|status|type|result/i;
+    const distinct = {};
+    for (const r of rows) {
+      for (const [k, v] of Object.entries(r)) {
+        if (!interestingKeys.test(k)) continue;
+        if (v === null || typeof v === "object") continue;
+        if (!distinct[k]) distinct[k] = new Set();
+        distinct[k].add(String(v));
+      }
+    }
+    const distinctSorted = Object.fromEntries(
+      Object.entries(distinct).sort().map(([k, s]) => [k, [...s].sort()])
+    );
+
+    res.json({
+      period: { start, end },
+      unit: {
+        firstUnit: firstUnit ?? null,
+        accountIdFound: accountId,
+        accountIdNote: accountId == null
+          ? "account_id / accountId / account.id all missing — check firstUnit fields above"
+          : undefined,
+      },
+      showings: {
+        error: showingsError ?? undefined,
+        total: rows.length,
+        firstRow: rows[0] ?? null,
+        distinctInterestingFields: distinctSorted,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
 

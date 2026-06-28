@@ -52,6 +52,31 @@ export const rentengine = {
     }),
   listMarketingListings: (accountId) =>
     accountId ? request(`/marketing/listings/${accountId}`) : null,
+  // Row-level showings. accountIds is a scalar or array of RE account ids;
+  // start/end must be full ISO timestamp strings.
+  // NOTE: the API caps each call at 32 days — use listShowingsForWindow for
+  // longer windows.
+  listShowings: ({ accountIds, start, end } = {}) =>
+    listAll("/reporting/showings", { account_ids: accountIds, start, end }),
+  // Fetch showings across a window of any length by chunking into <=30-day
+  // slices (the API rejects ranges > 32 days) and concatenating all rows.
+  listShowingsForWindow: async ({ accountIds, start, end }) => {
+    const CHUNK_MS = 30 * 24 * 60 * 60 * 1000;
+    const out = [];
+    let cursorMs = new Date(start).getTime();
+    const endMs = new Date(end).getTime();
+    while (cursorMs <= endMs) {
+      const chunkEndMs = Math.min(cursorMs + CHUNK_MS - 1, endMs);
+      const rows = await listAll("/reporting/showings", {
+        account_ids: accountIds,
+        start: new Date(cursorMs).toISOString(),
+        end: new Date(chunkEndMs).toISOString(),
+      });
+      out.push(...rows);
+      cursorMs = chunkEndMs + 1;
+    }
+    return out;
+  },
   // Per-unit leasing performance: true days_on_market plus showings, calls,
   // texts, applications, prospects, and property_health for the period.
   unitLeasingPerformance: (unitId, start, end) =>

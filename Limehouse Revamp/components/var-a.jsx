@@ -24,8 +24,106 @@ const VarA = (function() {
   };
   const DEFAULT_RANGE = 'currentMonth';
 
+  // ── Logs panel (slide-in from right) ─────────────────────────────────────
+  function LogsPanel({ open, onClose }) {
+    const [logs, setLogs] = useState([]);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+
+    useEffect(() => {
+      if (!open) return;
+      setLoading(true);
+      setError(null);
+      fetch('/api/sync-log')
+        .then(r => r.json())
+        .then(data => { setLogs(Array.isArray(data) ? data : []); setLoading(false); })
+        .catch(() => { setError('Failed to load sync history.'); setLoading(false); });
+    }, [open]);
+
+    if (!open) return null;
+
+    const fmtTime = (ts) => {
+      if (!ts) return '—';
+      try {
+        return new Date(ts).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+      } catch (e) { return ts; }
+    };
+
+    const statusColor = (s) => s === 'error' ? '#c0392b' : s === 'running' ? '#d68910' : '#3d8c1f';
+    const statusBg    = (s) => s === 'error' ? '#f6dad6' : s === 'running' ? '#fbeed1' : '#e8f0e0';
+
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, background: 'rgba(28,33,25,0.45)',
+        zIndex: 200, display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end',
+      }} onClick={onClose}>
+        <div style={{
+          background: '#fff', width: 420, maxWidth: '100vw', height: '100vh',
+          overflowY: 'auto', boxShadow: '-4px 0 24px rgba(0,0,0,0.10)',
+          display: 'flex', flexDirection: 'column',
+        }} onClick={e => e.stopPropagation()}>
+          <div style={{
+            padding: '18px 20px 14px', borderBottom: '1px solid #e5e8e2',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: '#1c2119' }}>Sync History</div>
+              <div style={{ fontSize: 11, color: '#9aa595', marginTop: 2 }}>Last 20 sync events</div>
+            </div>
+            <button onClick={onClose} style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              fontSize: 20, color: '#9aa595', lineHeight: 1, padding: 4,
+            }}>×</button>
+          </div>
+          <div style={{ flex: 1, padding: '4px 0' }}>
+            {loading && (
+              <div style={{ padding: '32px 20px', textAlign: 'center', color: '#9aa595', fontSize: 12, fontStyle: 'italic' }}>Loading…</div>
+            )}
+            {error && (
+              <div style={{ padding: '20px', color: '#c0392b', fontSize: 12 }}>{error}</div>
+            )}
+            {!loading && !error && logs.length === 0 && (
+              <div style={{ padding: '32px 20px', textAlign: 'center', color: '#9aa595', fontSize: 12, fontStyle: 'italic' }}>No sync history yet.</div>
+            )}
+            {!loading && logs.map((log, i) => (
+              <div key={log.id} style={{
+                padding: '12px 20px',
+                borderBottom: i < logs.length - 1 ? '1px solid #f3f4f0' : 'none',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: statusColor(log.status), flexShrink: 0 }} />
+                    <span style={{ fontSize: 12, fontWeight: 600, color: '#1c2119' }}>{log.sync_type || 'full'}</span>
+                    <span style={{
+                      fontSize: 10, fontWeight: 600, color: statusColor(log.status),
+                      background: statusBg(log.status), padding: '1px 6px', borderRadius: 4,
+                    }}>{log.status}</span>
+                  </div>
+                  {log.records_synced > 0 && (
+                    <span style={{ fontSize: 11, color: '#6b7566', flexShrink: 0 }}>{log.records_synced.toLocaleString()} records</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: '#9aa595', paddingLeft: 14 }}>
+                  {fmtTime(log.started_at)}
+                  {log.completed_at && log.started_at && (
+                    <span style={{ marginLeft: 6, color: '#cbd1c4' }}>
+                      · {Math.round((new Date(log.completed_at) - new Date(log.started_at)) / 1000)}s
+                    </span>
+                  )}
+                </div>
+                {log.error_message && (
+                  <div style={{ marginTop: 5, fontSize: 11, color: '#c0392b', paddingLeft: 14, fontStyle: 'italic' }}>{log.error_message}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Header ────────────────────────────────────────────────────────────────
-  function Header({ syncedAt, range, onRangeChange, mobile }) {
+  function Header({ syncedAt, range, onRangeChange, mobile, onLogsOpen }) {
     const [syncing, setSyncing] = useState(false);
     return (
       <header style={{
@@ -47,8 +145,7 @@ const VarA = (function() {
           </div>
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
-          <a href="#" style={{ fontSize: 12, color: '#6b7566', textDecoration: 'none', padding: '5px 9px', borderRadius: 6 }}>Logs</a>
-          <a href="#" style={{ fontSize: 12, color: '#6b7566', textDecoration: 'none', padding: '5px 9px', borderRadius: 6 }}>Settings</a>
+          <button onClick={onLogsOpen} style={{ fontSize: 12, color: '#6b7566', background: 'none', border: 'none', padding: '5px 9px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit' }}>Logs</button>
           <select value={range} onChange={(e) => onRangeChange(e.target.value)} style={{
             background: '#f4f5f3', border: '1px solid #e5e8e2',
             color: '#1c2119', padding: mobile ? '5px 24px 5px 9px' : '6px 26px 6px 11px',
@@ -795,6 +892,7 @@ const VarA = (function() {
 
   function Render({ tweaks }) {
     const [drillKey, setDrillKey] = useState(null);
+    const [logsOpen, setLogsOpen] = useState(false);
     // Persist the active tab + reporting period across reloads so a refresh (or
     // the post-sync auto-reload) keeps the user where they were.
     const [tab, setTab] = useState(() => {
@@ -866,7 +964,7 @@ const VarA = (function() {
 
     return (
       <div style={{ background: '#f4f5f3', minHeight: '100%', fontFamily: "'Outfit', sans-serif" }}>
-        <Header syncedAt={SD.meta.syncedAt} range={range} onRangeChange={setRange} mobile={mobile} />
+        <Header syncedAt={SD.meta.syncedAt} range={range} onRangeChange={setRange} mobile={mobile} onLogsOpen={() => setLogsOpen(true)} />
 
         {/* Tab nav */}
         <div style={{
@@ -1054,11 +1152,14 @@ const VarA = (function() {
 
           {/* MARKETING */}
           <SectionHeader title="Marketing & Showings" />
-          <div style={{ display: 'grid', gridTemplateColumns: dgrid(4), gap: mobile ? 8 : 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: dgrid(3), gap: mobile ? 8 : 10 }}>
             <KPI {...k('Avg days on market', 'RE', SD.marketing.avgDaysOnMarket, '', 'daysOnMarket', '#2471a3', false, null, 'avgDaysOnMarket')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Median DOM', 'RE', SD.marketing.medianDaysOnMarket, null, null, null, false, null, 'medianDaysOnMarket')} mobile={mobile} showSource={showSource} />
             <KPI {...k('Units on market', 'RE', SD.marketing.unitsOnMarket, null, null, null, false, null, 'unitsOnMarket')} mobile={mobile} showSource={showSource} />
-            <KPI {...k('Completion rate', 'RE', SD.marketing.completionRate, '%', null, null, false, null, 'completionRate')} mobile={mobile} showSource={showSource} />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: dgrid(2), gap: mobile ? 8 : 10, marginTop: mobile ? 8 : 10 }}>
+            <KPI {...k('Showing Completion — Accompanied', 'RE', SD.marketing.completionRateAccompanied, '%', null, '#3d8c1f', false, null, 'completionRateAccompanied')} mobile={mobile} showSource={showSource} />
+            <KPI {...k('Showing Completion — Self-Guided', 'RE', SD.marketing.completionRateSelfGuided, '%', null, '#2471a3', false, null, 'completionRateSelfGuided')} mobile={mobile} showSource={showSource} />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: mobile ? 8 : 10, marginTop: mobile ? 8 : 10 }}>
             <ChartCard mobile={mobile}
@@ -1086,6 +1187,8 @@ const VarA = (function() {
           </div>
         </div>
         </>)}
+
+        <LogsPanel open={logsOpen} onClose={() => setLogsOpen(false)} />
 
         {/* Single unified drill-down modal — shared across all tabs */}
         <Modal open={!!drill} onClose={() => setDrillKey(null)}

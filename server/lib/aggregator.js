@@ -140,14 +140,19 @@ export async function buildDashboard(win) {
   const winLabel = win.label || "";
 
   // ── RentEngine data (still live — not in DB yet) ───────────────────────
-  // Flow endpoints (prospects, application groups, per-unit leasing perf) are
-  // pulled for the selected window so showings/calls/texts/prospects honor it.
-  const [reUnits, reProspects, reAppGroups, bdApplicants, bdVendors] = await Promise.all([
-    safe(rentengine.listUnits(), []),
+  // Fetch units first so we can extract account_ids for the showings report,
+  // then fire everything else (including showings) in parallel.
+  const reUnits = await safe(rentengine.listUnits(), []);
+  const reAccountIds = [...new Set(reUnits.map(u => u.account_id).filter(Boolean))];
+
+  const [reProspects, reAppGroups, bdApplicants, bdVendors, allShowings] = await Promise.all([
     safe(rentengine.listProspects(winStartFull, winEndFull), []),
     safe(rentengine.listApplicationGroups({ createdAfter: winStartFull, createdBefore: winEndFull }), []),
     safe(buildium.listApplicants(), []),
     safe(buildium.listVendors(["Active"]), []),
+    reAccountIds.length > 0
+      ? safe(rentengine.listShowingsForWindow({ accountIds: reAccountIds, start: winStartFull, end: winEndFull }), [])
+      : Promise.resolve([]),
   ]);
 
   // Per-unit leasing performance (true days_on_market, showings, calls,
@@ -191,7 +196,8 @@ export async function buildDashboard(win) {
     // Everything else is point-in-time / structural and reads as-of-today.
     flowMetrics: [
       "grossIncome","netIncome","moveins","appsSubmitted","appsPerMovein",
-      "newProspects","showingsCompleted","totalCalls","totalTexts","completionRate",
+      "newProspects","showingsCompleted","totalCalls","totalTexts",
+      "completionRate","completionRateAccompanied","completionRateSelfGuided",
     ],
     liveMetrics: [
       "delinquent","delinquentCount","rentCollectedBy3rd","rentCollectedBy10th",
@@ -201,7 +207,8 @@ export async function buildDashboard(win) {
       "renewalRate","renewalsCount","fixedLeases","mtmLeases",
       "appsSubmitted","moveins","appsPerMovein","evictionsPending",
       "avgDaysOnMarket","medianDaysOnMarket","unitsOnMarket","newProspects",
-      "showingsCompleted","totalCalls","totalTexts","completionRate",
+      "showingsCompleted","totalCalls","totalTexts",
+      "completionRate","completionRateAccompanied","completionRateSelfGuided",
       "avgTenancyMonths","avgSdWithheld","avgSdWithheldPct",
     ],
   };
@@ -585,26 +592,72 @@ export async function buildDashboard(win) {
     appsRequestedRE   += p.applications_requested || 0;
     appsSubmittedRE   += p.applications_submitted || 0;
   }
-  // Showing completion rate — AVAILABLE LISTINGS ONLY (Deb: "I don't want lease
-  // status, I want just available"). Iterate reAvailable and pull each unit's
-  // perf rather than summing every unit.
-  // NOTE: RentEngine's per-unit report does not break showings into types — only
-  // showings_scheduled / showings_completed exist (no accompanied vs self split),
-  // so self-showings cannot be excluded. Logged once below for confirmation.
-  let showingsScheduled = 0, showingsCompleted = 0;
-  for (const u of reAvailable) {
-    const p = perfByUnit.get(u.id);
-    if (!p) continue;
-    showingsScheduled += p.showings_scheduled || 0;
-    showingsCompleted += p.showings_completed || 0;
+  // ── Showing completion — row-level, split by method ──────────────────
+  // Data source: /reporting/showings (row-level API, chunked into <=30-day
+  // slices). Each showing has a "status" field; method comes from the unit's
+  // "showing_method" field, matched by address.
+  //
+  // Status values: "Showing Complete" | "Showing Canceled" | "Missed Showing"
+  // Method values (on unit): "Accompanied" | "Self Guided"
+  const normalizeAddr = s => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+
+  // Build address → showing_method map from RE units.
+  const unitMethodByAddr = new Map();
+  for (const u of reUnits) {
+    const addr = normalizeAddr(u?.address?.formatted_address);
+    if (addr) unitMethodByAddr.set(addr, u.showing_method || null);
   }
+  if (reAccountIds.length === 0) {
+    console.warn("[agg] listShowingsForWindow: no account_id found on RE units — showings metrics will be zero");
+  }
+
+  let showingsCompleted = 0, showingsScheduled = 0;
+  let accComp = 0, accTotal = 0;
+  let sgComp = 0, sgTotal = 0;
+  let methodUnknownCount = 0;
+  // Drilldown row arrays: [address, status, method, date]
+  const accDrillRows = [], sgDrillRows = [], allShowingDrillRows = [];
+
+  for (const s of allShowings) {
+    const isComplete = s.status === "Showing Complete";
+    const isCanceled = s.status === "Showing Canceled";
+    const isMissed   = s.status === "Missed Showing";
+    if (!isComplete && !isCanceled && !isMissed) continue;
+
+    showingsScheduled++;
+    if (isComplete) showingsCompleted++;
+
+    const addr = normalizeAddr(s.property_address);
+    let method = null;
+    if (addr && unitMethodByAddr.has(addr)) {
+      method = unitMethodByAddr.get(addr);
+    } else {
+      methodUnknownCount++;
+      if (methodUnknownCount <= 5) {
+        console.warn(`[agg] showing address not matched: "${s.property_address}" — counted as unknown method`);
+      }
+    }
+
+    const dateStr = (s.scheduled_at || s.started_at || s.created_at || "").slice(0, 10);
+    const drillRow = [s.property_address || "—", s.status, method || "unknown", dateStr];
+    allShowingDrillRows.push(drillRow);
+
+    if (method === "Accompanied") {
+      accTotal++; if (isComplete) accComp++;
+      accDrillRows.push(drillRow);
+    } else if (method === "Self Guided") {
+      sgTotal++;  if (isComplete) sgComp++;
+      sgDrillRows.push(drillRow);
+    }
+  }
+
+  const completionRateAccompanied = accTotal > 0 ? Math.round((accComp / accTotal) * 1000) / 10 : 0;
+  const completionRateSelfGuided  = sgTotal  > 0 ? Math.round((sgComp  / sgTotal)  * 1000) / 10 : 0;
+  // Blended rate kept for the marketing funnel row.
   const completionRate = showingsScheduled > 0
     ? Math.round((showingsCompleted / showingsScheduled) * 1000) / 10
     : 0;
-  // One-time visibility into the RentEngine per-unit perf fields so we can
-  // confirm there is no accompanied/self showing breakdown to exclude.
-  const _firstPerf = [...perfByUnit.values()][0];
-  if (_firstPerf) console.log("[agg] RentEngine perf fields:", Object.keys(_firstPerf).join(", "));
+  console.log(`[agg] showings: ${allShowings.length} rows · acc ${accComp}/${accTotal} (${completionRateAccompanied}%) · sg ${sgComp}/${sgTotal} (${completionRateSelfGuided}%) · unknown method ${methodUnknownCount}`);
 
   const marketing = {
     unitsOnMarket: buildKpi(unitsOnMarket, 0, { invertDelta: true }),
@@ -615,6 +668,8 @@ export async function buildDashboard(win) {
     totalCalls: buildKpi(totalCalls, 0),
     totalTexts: buildKpi(totalTexts, 0),
     completionRate: buildKpi(completionRate, 0, { unit: "%" }),
+    completionRateAccompanied: buildKpi(completionRateAccompanied, 0, { unit: "%" }),
+    completionRateSelfGuided: buildKpi(completionRateSelfGuided, 0, { unit: "%" }),
   };
 
   // ── SPARKLINES ─────────────────────────────────────────────────────────
@@ -898,7 +953,7 @@ export async function buildDashboard(win) {
       {
         abbrev: "APM", name: "Assistant Property Manager", people: 2,
         kpis: [
-          { name: "Showing Completion Rate", source: "RE", target: 95, direction: "gte", format: "pct", value: completionRate || null, drillKey: "kpiShowingCompletion" },
+          { name: "Showing Completion — Accompanied", source: "RE", target: 95, direction: "gte", format: "pct", value: completionRateAccompanied || null, drillKey: "kpiShowingCompletion" },
         ],
       },
       {
@@ -987,8 +1042,10 @@ export async function buildDashboard(win) {
     appsSubmitted: { title: `Applications submitted — ${winLabel}`, cols: ["Applicant", "Status", "App #", "Submitted"], rows: submittedApps.slice().sort((x, y) => (y.app.ApplicationSubmittedDateTime || "").localeCompare(x.app.ApplicationSubmittedDateTime || "")).slice(0, 500).map(({ applicant, app }) => [`${applicant.FirstName || ""} ${applicant.LastName || ""}`.trim() || "—", app.ApplicationStatus || applicant.Status || "—", app.ApplicationNumber || String(app.Id || ""), (app.ApplicationSubmittedDateTime || "").slice(0, 10)]), summary: `${appsSubmitted} applications submitted` },
     moveins: { title: `Move-ins — ${winLabel}`, cols: ["Property", "Unit", "Start"], rows: query(`SELECT l.from_date, l.property_id, u.unit_number FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND l.status != 'Future' AND l.from_date >= ? AND l.from_date <= ? ORDER BY l.from_date DESC LIMIT 200`, [winStartIso, winEndIso]).map(r => [propName(r.property_id), r.unit_number || "—", r.from_date || "—"]), summary: `${moveins} move-ins` },
     appsPerMovein: { title: "Funnel", cols: ["Stage", "Count"], rows: [["Apps", String(appsSubmitted)], ["Move-ins", String(moveins)], ["Ratio", moveins ? (appsSubmitted / moveins).toFixed(1) : "—"]], summary: moveins ? `${(appsSubmitted / moveins).toFixed(1)} apps per move-in` : "—" },
-    completionRate: { title: `Showing completion rate — ${winLabel}`, cols: ["Address", "Status", "Scheduled", "Completed", "Rate"], rows: reAvailable.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.showings_scheduled) return null; const r = Math.round((p.showings_completed / p.showings_scheduled) * 1000) / 10; return [reAddr(u), u.status || "—", String(p.showings_scheduled), String(p.showings_completed), `${r}%`]; }).filter(Boolean), summary: `${showingsCompleted}/${showingsScheduled} = ${completionRate}%`, note: `Sum of showings_completed ÷ sum of showings_scheduled across AVAILABLE listings only (status not 'Leased') within ${winLabel}. RentEngine does not split showings into accompanied vs self, so self-showings cannot be excluded.` },
-    showingsCompleted: { title: `Showings completed — ${winLabel}`, cols: ["Address", "Status", "Scheduled", "Completed"], rows: reAvailable.map(u => { const p = perfByUnit.get(u.id); if (!p || (!p.showings_scheduled && !p.showings_completed)) return null; return [reAddr(u), u.status || "—", String(p.showings_scheduled || 0), String(p.showings_completed || 0)]; }).filter(Boolean), summary: `${showingsCompleted} completed · ${showingsScheduled} scheduled`, note: `From RentEngine /reporting/leasing-performance/units, summed across AVAILABLE listings only (status not 'Leased') within ${winLabel}.` },
+    completionRate: { title: `Showing completion — all methods — ${winLabel}`, cols: ["Address", "Status", "Method", "Date"], rows: allShowingDrillRows.slice(0, 500), summary: `${showingsCompleted}/${showingsScheduled} = ${completionRate}% (blended)`, note: `Row-level data from RentEngine /reporting/showings. Counts "Showing Complete" as completed; "Showing Canceled" and "Missed Showing" as not completed. Method matched from unit.showing_method by address.` },
+    showingsCompleted: { title: `Showings completed — ${winLabel}`, cols: ["Address", "Status", "Method", "Date"], rows: allShowingDrillRows.filter(r => r[1] === "Showing Complete").slice(0, 500), summary: `${showingsCompleted} completed · ${showingsScheduled} total`, note: `From RentEngine /reporting/showings, ${winLabel}. Source: row-level showings report.` },
+    completionRateAccompanied: { title: `Showing Completion — Accompanied — ${winLabel}`, cols: ["Address", "Status", "Method", "Date"], rows: accDrillRows.slice(0, 500), summary: `${accComp}/${accTotal} = ${completionRateAccompanied}% · target ≥95%`, note: `Accompanied showings only. Formula: "Showing Complete" ÷ ("Showing Complete" + "Showing Canceled" + "Missed Showing") for units whose showing_method is "Accompanied". Source: RentEngine /reporting/showings, ${winLabel}.` },
+    completionRateSelfGuided: { title: `Showing Completion — Self-Guided — ${winLabel}`, cols: ["Address", "Status", "Method", "Date"], rows: sgDrillRows.slice(0, 500), summary: `${sgComp}/${sgTotal} = ${completionRateSelfGuided}%`, note: `Self-guided showings only. Cancellations here are prospect-driven (the prospect cancels the self-tour from their end) and are outside the team's control — this rate is provided for visibility only, not as a performance target. Source: RentEngine /reporting/showings, ${winLabel}.` },
     totalCalls: { title: `Calls — ${winLabel}`, cols: ["Unit", "Status", "Calls"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.total_calls) return null; return [String(u.id), u.status || "—", String(p.total_calls)]; }).filter(Boolean).sort((a, b) => Number(b[2]) - Number(a[2])), summary: `${totalCalls} calls`, note: `From RentEngine /reporting/leasing-performance/units total_calls field, summed across all units within ${winLabel}.` },
     totalTexts: { title: `Outbound texts — ${winLabel}`, cols: ["Unit", "Status", "Texts"], rows: reUnits.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.outbound_texts) return null; return [String(u.id), u.status || "—", String(p.outbound_texts)]; }).filter(Boolean).sort((a, b) => Number(b[2]) - Number(a[2])), summary: `${totalTexts} texts`, note: `From RentEngine /reporting/leasing-performance/units outbound_texts field, summed across all units within ${winLabel}.` },
     unitsOnMarket: { title: "On market", cols: ["Address", "Status", "Health", "Days"], rows: reAvailable.slice(0, 200).map(u => { const p = perfByUnit.get(u.id); const d = p?.days_on_market != null ? p.days_on_market : (u.created_at ? Math.floor((now - new Date(u.created_at)) / 86400000) : 0); return [reAddr(u), u.status || "—", p?.property_health || "—", String(d)]; }), summary: `${unitsOnMarket} listed`, note: "All RentEngine units whose status is not 'Leased' (Available + On Hold). The 'is_occupied' flag is intentionally ignored because it lags reality. Days and Health come from RentEngine's per-unit leasing-performance report." },
@@ -1063,11 +1120,11 @@ export async function buildDashboard(win) {
       note: `Formula: sum of TotalBalance across active leases with a positive balance ÷ sum of monthly rent across all active leases. Source: Buildium /leases/outstandingbalances and the rent field on active leases.`,
     },
     kpiShowingCompletion: {
-      title: "Showing Completion Rate",
-      cols: ["Address", "Status", "Scheduled", "Completed", "Rate"],
-      rows: reAvailable.map(u => { const p = perfByUnit.get(u.id); if (!p || !p.showings_scheduled) return null; const r = Math.round((p.showings_completed / p.showings_scheduled) * 1000) / 10; return [reAddr(u), u.status || "—", String(p.showings_scheduled), String(p.showings_completed), `${r}%`]; }).filter(Boolean),
-      summary: `${showingsCompleted} completed ÷ ${showingsScheduled} scheduled = ${completionRate}% · available listings only · target ≥95%`,
-      note: `Formula: Σ showings_completed ÷ Σ showings_scheduled across AVAILABLE listings only (RentEngine status not 'Leased') within ${winLabel}. RentEngine does not break showings into accompanied vs self, so self-showings cannot be excluded. Source: RentEngine /reporting/leasing-performance/units/{unitId}.`,
+      title: `Showing Completion — Accompanied — ${winLabel}`,
+      cols: ["Address", "Status", "Method", "Date"],
+      rows: accDrillRows.slice(0, 500),
+      summary: `${accComp} completed ÷ ${accTotal} total = ${completionRateAccompanied}% · accompanied showings only · target ≥95%`,
+      note: `Formula: "Showing Complete" ÷ ("Showing Complete" + "Showing Canceled" + "Missed Showing") for units whose showing_method is "Accompanied". Only accompanied showings are used for the team KPI — self-guided cancellations are prospect-driven and outside the team's control. Source: RentEngine /reporting/showings, ${winLabel}.`,
     },
     kpiReconciliation: {
       title: "Reconciliation Accuracy",
