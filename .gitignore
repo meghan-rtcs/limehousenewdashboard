@@ -10,3 +10,4 @@ node_modules/
 server/data/limehouse.sqlite
 server/data/limehouse.sqlite-shm
 server/data/limehouse.sqlite-wal
+ecosystem.config.cjs

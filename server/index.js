@@ -28,7 +28,7 @@ app.use(express.urlencoded({ extended: false }));
 // Single shared password (env DASHBOARD_PASSWORD) gates the whole dashboard.
 // Cookie-session login page rather than HTTP Basic Auth because the Replit
 // preview runs in a cross-site iframe where native Basic Auth prompts are
-// blocked. The session cookie is SameSite=None; Secure so it is sent inside
+// blocked. The session cookie is SameSite=Lax so it is sent inside
 // that cross-site iframe. The cookie stores an HMAC of a fixed string keyed by
 // the password — never the password itself.
 const AUTH_PASSWORD = process.env.DASHBOARD_PASSWORD || "";
@@ -129,14 +129,14 @@ app.post("/login", (req, res) => {
   if (AUTH_PASSWORD && timingSafeEqual(pw, AUTH_PASSWORD)) {
     loginAttempts.delete(ip);
     res.setHeader("Set-Cookie",
-      `${AUTH_COOKIE}=${authToken()}; HttpOnly; Path=/; Max-Age=${SESSION_MAX_AGE}; SameSite=None; Secure`);
+      `${AUTH_COOKIE}=${authToken()}; HttpOnly; Path=/; Max-Age=${SESSION_MAX_AGE}; SameSite=Lax`);
     return res.redirect("/");
   }
   rec.count++;
   res.status(401).type("html").send(loginPage(true));
 });
 app.post("/logout", (req, res) => {
-  res.setHeader("Set-Cookie", `${AUTH_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=None; Secure`);
+  res.setHeader("Set-Cookie", `${AUTH_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`);
   res.redirect("/login");
 });
 
