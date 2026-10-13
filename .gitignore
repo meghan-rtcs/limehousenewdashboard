@@ -11,3 +11,7 @@ server/data/limehouse.sqlite
 server/data/limehouse.sqlite-shm
 server/data/limehouse.sqlite-wal
 ecosystem.config.cjs
+
+server/data/*.sqlite
+server/data/*.sqlite-wal
+server/data/*.sqlite-shm
