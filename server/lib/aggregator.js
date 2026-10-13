@@ -1,8 +1,6 @@
 import { query, queryOne } from "./db.js";
 import { buildLeadSimpleKpis } from "./ls-aggregator.js";
 import { buildTeamPerformance } from "./team-aggregator.js";
-import { rentengine } from "./rentengine.js";
-import { buildium } from "./buildium.js";
 
 const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -26,7 +24,7 @@ const NEGATE_EXPENSE = false;
 // active vendors so the metric never silently empties out.
 const MAINTENANCE_CATEGORY_PREFIXES = ["contractor"];
 function readVendorCategory(v) {
-  return String(v?.Category?.Name ?? "").trim();
+  return String(v?.category_name ?? "").trim();
 }
 function isMaintenanceVendor(v) {
   const c = readVendorCategory(v).toLowerCase();
@@ -40,25 +38,6 @@ function buildKpi(value, prevYear = 0, opts = {}) {
 function toET(d) {
   return new Date(d).toLocaleString("en-US", { timeZone: "America/New_York" });
 }
-function safe(promise, fallback) {
-  return promise.catch((err) => { console.warn("[agg] non-fatal:", err.message); return fallback; });
-}
-
-// Run an async mapper over items with a concurrency cap. Used to avoid
-// Buildium / RentEngine 429s when we'd otherwise fire 50+ calls in parallel.
-async function pMap(items, concurrency, fn) {
-  const out = new Array(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
-      const i = cursor++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i], i);
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
 
 // ── PERIOD / DATE WINDOWING ──────────────────────────────────────────────────
 // Turns a period key into an explicit { key, label, start, end } window. Flow
@@ -67,7 +46,7 @@ async function pMap(items, concurrency, fn) {
 // Structural / point-in-time metrics (occupancy, delinquency, vendor compliance,
 // etc.) ignore the window and are always reported as of "now" — the frontend
 // labels them "as of today".
-export const PERIOD_KEYS = ["currentMonth", "lastMonth", "currentQuarter", "lastQuarter", "currentYear", "lastYear"];
+export const PERIOD_KEYS = ["currentMonth", "lastMonth", "currentQuarter", "lastQuarter", "currentYear", "lastYear", "q1", "q2", "q3", "q4"];
 function fmtRange(start, end) {
   const opts = { month: "short", day: "numeric", timeZone: "UTC" };
   const s = start.toLocaleDateString("en-US", opts);
@@ -109,6 +88,22 @@ export function periodToWindow(key, now = new Date()) {
       end = new Date(Date.UTC(y - 1, 11, 31, 23, 59, 59, 999));
       label = `Last year · ${fmtRange(start, end)}`;
       break;
+    // Explicit calendar quarters of the CURRENT year (independent of "today"
+    // falling inside them) — used by the Team Performance tab's own Q1–Q4
+    // selector, decoupled from the main dashboard's this/last-quarter filter.
+    // A quarter that hasn't started yet naturally yields an empty window; a
+    // quarter already fully elapsed uses its real end date; the quarter
+    // "today" falls inside is capped at endOfDay(now), same as currentQuarter.
+    case "q1": case "q2": case "q3": case "q4": {
+      const qNum = Number(key[1]); // 1-4
+      const qStartMonth = (qNum - 1) * 3;
+      start = new Date(Date.UTC(y, qStartMonth, 1));
+      const qEnd = new Date(Date.UTC(y, qStartMonth + 3, 0, 23, 59, 59, 999));
+      const inProgress = qEnd.getTime() > now.getTime();
+      end = inProgress ? endOfDay(now) : qEnd;
+      label = `Q${qNum} ${y} · ${fmtRange(start, qEnd)}`;
+      return { key, label, start, end, quarterEnd: qEnd, inProgress };
+    }
     case "currentMonth":
     default:
       key = "currentMonth";
@@ -139,48 +134,41 @@ export async function buildDashboard(win) {
   const winKey = win.key || "currentMonth";
   const winLabel = win.label || "";
 
-  // ── RentEngine data (still live — not in DB yet) ───────────────────────
-  // Fetch units first so we can extract account_ids for the showings report,
-  // then fire everything else (including showings) in parallel.
-  const reUnits = await safe(rentengine.listUnits(), []);
+  // ── RentEngine units (synced nightly, no live call) ────────────────────
+  const reUnits = query(`SELECT id, account_id, formatted_address, showing_method, status, created_at FROM re_units`);
   const reAccountIds = [...new Set(reUnits.map(u => u.account_id).filter(Boolean))];
 
-  const [reProspects, reAppGroups, bdApplicants, bdVendors, allShowings] = await Promise.all([
-    safe(rentengine.listProspects(winStartFull, winEndFull), []),
-    safe(rentengine.listApplicationGroups({ createdAfter: winStartFull, createdBefore: winEndFull }), []),
-    safe(buildium.listApplicants(), []),
-    safe(buildium.listVendors(["Active"]), []),
-    reAccountIds.length > 0
-      ? safe(rentengine.listShowingsForWindow({ accountIds: reAccountIds, start: winStartFull, end: winEndFull }), [])
-      : Promise.resolve([]),
-  ]);
+  const bdVendors = query(`SELECT id, name, is_active, category_name, tax_payer_id, tax_payer_id_type, include_in_1099, insurance_expiration_date FROM vendors`);
+  const reProspects = query(`SELECT id, name, source, created_at FROM re_prospects WHERE created_at >= ? AND created_at <= ?`, [winStartFull, winEndFull]);
 
-  // Per-unit leasing performance (true days_on_market, showings, calls,
-  // texts, applications, property_health) — one call per unit, run in
-  // parallel. Each call is wrapped in safe() so a single 404/500 won't
-  // poison the whole sync.
-  // Showings / calls / texts are flow metrics → pull perf for the selected
-  // window. days_on_market is a listing-age attribute (independent of the report
-  // window) and is treated as a structural / as-of-today metric downstream.
-  const perfList = await Promise.all(
-    reUnits.map(u => safe(rentengine.unitLeasingPerformance(u.id, winStartFull, winEndFull), null))
-  );
+  const allShowings = query(`SELECT property_address, status, scheduled_at, started_at, created_at FROM re_showings WHERE created_at >= ? AND created_at <= ?`, [winStartFull, winEndFull]);
+
+  // Per-unit leasing performance — synced nightly (sync.js syncReUnitPerf +
+  // backfillReUnitPerf), no live RentEngine call here. days_on_market /
+  // property_health are structural (as-of-today, from re_unit_status);
+  // total_calls / outbound_texts are windowed flow metrics, reconstructed by
+  // summing whichever (year, month) buckets in re_unit_monthly_perf overlap
+  // the selected window.
+  const winYM0 = winStart.getUTCFullYear() * 100 + (winStart.getUTCMonth() + 1);
+  const winYM1 = winEnd.getUTCFullYear() * 100 + (winEnd.getUTCMonth() + 1);
   const perfByUnit = new Map();
-  perfList.forEach((p, i) => { if (p) perfByUnit.set(reUnits[i].id, p); });
-
-  // Buildium applications submitted within the selected window.
-  // Each applicant record has Applications[] with ApplicationSubmittedDateTime.
-  const submittedApps = [];
-  for (const a of bdApplicants) {
-    for (const app of a.Applications || []) {
-      const ts = app.ApplicationSubmittedDateTime;
-      if (!ts) continue;
-      const t = new Date(ts).getTime();
-      if (t >= winStartMs && t <= winEndMs) {
-        submittedApps.push({ applicant: a, app });
-      }
-    }
+  for (const r of query(`SELECT unit_id, days_on_market, property_health FROM re_unit_status`)) {
+    perfByUnit.set(r.unit_id, { days_on_market: r.days_on_market, property_health: r.property_health, total_calls: 0, outbound_texts: 0 });
   }
+  for (const r of query(`SELECT unit_id, SUM(total_calls) as total_calls, SUM(outbound_texts) as outbound_texts FROM re_unit_monthly_perf WHERE (year * 100 + month) BETWEEN ? AND ? GROUP BY unit_id`, [winYM0, winYM1])) {
+    const p = perfByUnit.get(r.unit_id) || { days_on_market: null, property_health: null };
+    p.total_calls = r.total_calls || 0;
+    p.outbound_texts = r.outbound_texts || 0;
+    perfByUnit.set(r.unit_id, p);
+  }
+
+  // Applications submitted within the selected window — synced nightly
+  // (server/lib/sync.js syncApplications), no live Buildium call here.
+  const submittedApps = query(
+    `SELECT id, applicant_first_name, applicant_last_name, application_number, status, submitted_at
+     FROM applications WHERE submitted_at IS NOT NULL AND submitted_at >= ? AND submitted_at <= ?`,
+    [new Date(winStartMs).toISOString(), new Date(winEndMs).toISOString()]
+  );
 
   // ── META ─────────────────────────────────────────────────────────────────
   const totalUnits = queryOne("SELECT COUNT(*) as c FROM units u JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1")?.c || 0;
@@ -190,7 +178,11 @@ export async function buildDashboard(win) {
     syncedAt, buildiumUnits: totalUnits, rentEngineUnits: reUnits.length, activeLeases: activeLeaseCount,
     // Selected reporting window for flow metrics + today's date for the
     // "structural metrics shown as of today" banner note on the frontend.
-    window: { key: winKey, label: winLabel, start: winStartIso, end: winEndIso },
+    window: {
+      key: winKey, label: winLabel, start: winStartIso, end: winEndIso,
+      inProgress: win.inProgress || false,
+      quarterEnd: win.quarterEnd ? win.quarterEnd.toISOString().slice(0, 10) : null,
+    },
     asOf: todayIso,
     // Flow metrics honor the selected window (numbers change per period).
     // Everything else is point-in-time / structural and reads as-of-today.
@@ -213,66 +205,62 @@ export async function buildDashboard(win) {
     ],
   };
 
-  // Fetch ALL leases (active/past/future) once from Buildium. We need the
-  // Tenants[] + MoveOutData[] arrays (not stored locally) for both the SD
-  // calc below and the tenancy-length calc that chains renewals per tenant.
-  const allLeasesAPI = await safe(buildium.listAllLeases(), []);
-  const allPastFromAPI = allLeasesAPI.filter(l => l.LeaseStatus === "Past");
-
-  // ── TENANCY LENGTH (trailing 12 months of move-outs) ──────────────────
-  // Chain renewals: a tenant's true tenancy starts at their FIRST MoveInDate
-  // on the unit (across all leases they appear on for that unit) and ends at
-  // their MoveOutDate on the most recent lease. Lease start/end dates reset
-  // every renewal in Buildium, so they undercount tenancy.
-  const earliestMoveInByTenantUnit = new Map();
-  for (const l of allLeasesAPI) {
-    const unitId = l.UnitId;
-    if (!unitId) continue;
-    for (const t of (l.Tenants || [])) {
-      const key = `${t.Id}-${unitId}`;
-      const candidate = t.MoveInDate || l.LeaseFromDate;
-      if (!candidate) continue;
-      const existing = earliestMoveInByTenantUnit.get(key);
-      if (!existing || candidate < existing) earliestMoveInByTenantUnit.set(key, candidate);
-    }
-  }
-
   // Active-property scope (matches every other metric in this file).
   const activePropIds = new Set(
     query("SELECT id FROM properties WHERE is_active = 1").map(r => r.id)
   );
 
+  // ── TENANCY LENGTH (trailing 12 months of move-outs) ──────────────────
+  // Chain renewals: a tenant's true tenancy starts at their FIRST move-in on
+  // the unit (across all leases they appear on for that unit) and ends at
+  // their MoveOutDate on the most recent lease. Lease start/end dates reset
+  // every renewal in Buildium, so they undercount tenancy.
+  // lease_tenants.move_in_date already has the "tenant's own MoveInDate, else
+  // lease's LeaseFromDate" fallback baked in at sync time (see syncLeases()),
+  // so this read is a straight MIN() rather than re-deriving the fallback.
+  const allTenantRows = query(`SELECT lt.tenant_id, lt.move_in_date, l.unit_id FROM lease_tenants lt JOIN leases l ON l.id = lt.lease_id WHERE l.unit_id IS NOT NULL AND lt.move_in_date IS NOT NULL`);
+  const earliestMoveInByTenantUnit = new Map();
+  for (const r of allTenantRows) {
+    const key = `${r.tenant_id}-${r.unit_id}`;
+    const existing = earliestMoveInByTenantUnit.get(key);
+    if (!existing || r.move_in_date < existing) earliestMoveInByTenantUnit.set(key, r.move_in_date);
+  }
+
   // Aggregate move-outs by (tenantId, unitId) so a tenant counted on multiple
-  // lease records (or duplicate MoveOutData rows) collapses to ONE record at
-  // their LATEST move-out for that unit. Then compute earliest move-in across
-  // all leases for that (tenant, unit) pair.
-  const moveOutsByKey = new Map(); // key -> { latestMoveOut, lease }
-  for (const lease of allPastFromAPI) {
-    if (!activePropIds.has(lease.PropertyId)) continue;
-    for (const mo of (lease.MoveOutData || [])) {
-      if (!mo.TenantId || !mo.MoveOutDate) continue;
-      if (mo.MoveOutDate < yearAgoIso || mo.MoveOutDate > todayIso) continue;
-      const key = `${mo.TenantId}|${lease.UnitId}`;
-      const existing = moveOutsByKey.get(key);
-      if (!existing || mo.MoveOutDate > existing.latestMoveOut) {
-        moveOutsByKey.set(key, { latestMoveOut: mo.MoveOutDate, lease, tenantId: mo.TenantId });
-      }
+  // lease records (or duplicate move-out rows) collapses to ONE record at
+  // their LATEST move-out for that unit.
+  const moveOutRows = query(
+    `SELECT lt.tenant_id, lt.lease_id, lt.move_out_date, l.unit_id, l.property_id, l.from_date, u.unit_number
+     FROM lease_tenants lt
+     JOIN leases l ON l.id = lt.lease_id
+     LEFT JOIN units u ON u.id = l.unit_id
+     WHERE l.status = 'Past' AND lt.move_out_date IS NOT NULL
+       AND lt.move_out_date >= ? AND lt.move_out_date <= ?`,
+    [yearAgoIso, todayIso]
+  );
+  const moveOutsByKey = new Map(); // key -> latest row for (tenantId, unitId)
+  for (const row of moveOutRows) {
+    if (!activePropIds.has(row.property_id)) continue;
+    const key = `${row.tenant_id}|${row.unit_id}`;
+    const existing = moveOutsByKey.get(key);
+    if (!existing || row.move_out_date > existing.move_out_date) {
+      moveOutsByKey.set(key, row);
     }
   }
 
   const tenancyDays = [];
-  for (const [key, { latestMoveOut, lease, tenantId }] of moveOutsByKey) {
-    const earliest = earliestMoveInByTenantUnit.get(`${tenantId}-${lease.UnitId}`) || lease.LeaseFromDate;
+  for (const row of moveOutsByKey.values()) {
+    const earliest = earliestMoveInByTenantUnit.get(`${row.tenant_id}-${row.unit_id}`) || row.from_date;
     if (!earliest) continue;
-    const days = Math.floor((new Date(latestMoveOut) - new Date(earliest)) / 86400000);
+    const days = Math.floor((new Date(row.move_out_date) - new Date(earliest)) / 86400000);
     if (!Number.isFinite(days) || days <= 0) continue;
     tenancyDays.push({
-      tenantId,
-      leaseId: lease.Id,
-      propertyId: lease.PropertyId,
-      unitNumber: lease.UnitNumber,
+      tenantId: row.tenant_id,
+      leaseId: row.lease_id,
+      propertyId: row.property_id,
+      unitNumber: row.unit_number,
       from: earliest,
-      to: latestMoveOut,
+      to: row.move_out_date,
       days,
     });
   }
@@ -289,25 +277,34 @@ export async function buildDashboard(win) {
   // reconciliation roughly 30 days after move-out, so this window only
   // includes move-outs that have had time to be reconciled on the ledger.
   // Withheld = sum of |TotalAmount| across Buildium "ApplyDeposit"
-  // transactions on that lease (capped at the original SD).
-  // Uses pMap to throttle the per-lease transactions calls so we don't
-  // trigger 429 rate-limit errors.
+  // transactions on that lease (capped at the original SD). Reads from the
+  // locally synced lease_transactions table (sync.js syncLeaseTransactions)
+  // — no live Buildium call here.
   // ms-math (not calendar math) to avoid Date overflow on month-end boundaries.
   const sdWindowEndIso = new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10);
   const sdWindowStartIso = new Date(now.getTime() - 395 * 86400000).toISOString().slice(0, 10);
-  const sdEligible = allPastFromAPI.filter(l => {
-    if (!activePropIds.has(l.PropertyId)) return false;
-    const sd = l.AccountDetails?.SecurityDeposit || 0;
-    return sd > 0 && l.LeaseToDate && l.LeaseToDate >= sdWindowStartIso && l.LeaseToDate <= sdWindowEndIso;
-  });
-  const propByLeaseId = new Map(allPastFromAPI.map(l => [l.Id, { propertyId: l.PropertyId, unitNumber: l.UnitNumber }]));
-  const txnLists = await pMap(sdEligible, 5, l => safe(buildium.leaseTransactions(l.Id), []));
+  const sdEligible = query(
+    `SELECT l.id, l.property_id, l.to_date, l.security_deposit, u.unit_number
+     FROM leases l LEFT JOIN units u ON u.id = l.unit_id
+     WHERE l.status = 'Past' AND l.security_deposit > 0
+       AND l.to_date >= ? AND l.to_date <= ?`,
+    [sdWindowStartIso, sdWindowEndIso]
+  ).filter(l => activePropIds.has(l.property_id));
+  const sdLeaseIds = sdEligible.map(l => l.id);
+  const sdTxns = sdLeaseIds.length
+    ? query(`SELECT lease_id, journal_memo, amount FROM lease_transactions WHERE lease_id IN (${sdLeaseIds.map(() => "?").join(",")}) AND type = 'ApplyDeposit'`, sdLeaseIds)
+    : [];
+  const sdTxnsByLease = new Map();
+  for (const t of sdTxns) {
+    if (!sdTxnsByLease.has(t.lease_id)) sdTxnsByLease.set(t.lease_id, []);
+    sdTxnsByLease.get(t.lease_id).push(t);
+  }
 
   const sdRecords = [];
-  sdEligible.forEach((lease, i) => {
-    const leaseId = lease.Id;
-    const sd = lease.AccountDetails?.SecurityDeposit || 0;
-    const txns = txnLists[i] || [];
+  sdEligible.forEach((lease) => {
+    const leaseId = lease.id;
+    const sd = lease.security_deposit || 0;
+    const txns = sdTxnsByLease.get(leaseId) || [];
     // Buildium uses TransactionTypeEnum=ApplyDeposit for BOTH security-deposit
     // reconciliations AND monthly prepayment applications. Filter by memo.
     // Surveyed memo variants across 20 reconciled leases:
@@ -320,10 +317,9 @@ export async function buildDashboard(win) {
     let withheld = 0;
     let applyDepositCount = 0;
     for (const t of txns) {
-      if (t.TransactionTypeEnum !== "ApplyDeposit") continue;
-      const memo = (t.Journal?.Memo || "").toLowerCase();
+      const memo = (t.journal_memo || "").toLowerCase();
       if (!memo.includes("deposit applied")) continue; // skip "Prepayment applied"
-      withheld += Math.abs(t.TotalAmount || 0);
+      withheld += Math.abs(t.amount || 0);
       applyDepositCount += 1;
     }
     if (applyDepositCount === 0) return; // skip un-reconciled move-outs
@@ -332,12 +328,11 @@ export async function buildDashboard(win) {
     // "withholding". This also defends against any other ApplyDeposit memo
     // variants that might slip through the filter above.
     const cappedWithheld = Math.min(withheld, sd);
-    const meta = propByLeaseId.get(leaseId) || {};
     sdRecords.push({
       leaseId,
-      propertyId: meta.propertyId,
-      unitNumber: meta.unitNumber,
-      moveOutDate: lease.LeaseToDate,
+      propertyId: lease.property_id,
+      unitNumber: lease.unit_number,
+      moveOutDate: lease.to_date,
       sd,
       withheld: cappedWithheld,
       pct: sd > 0 ? Math.min(100, +((cappedWithheld / sd) * 100).toFixed(1)) : 0,
@@ -412,6 +407,30 @@ export async function buildDashboard(win) {
     ownersTotal: buildKpi(ownersTotal, 0),
     ownersGained: buildKpi(propsGained.length, 0),
   };
+
+  // ── OCCUPANCY / DELINQUENCY AS OF THE SELECTED WINDOW'S END DATE ─────────
+  // `occupancy.rate` and the delinquency rate below are always "as of today"
+  // (matches the main dashboard's live tiles). Team Performance's quarterly
+  // PM scorecard needs the figure as it stood at THAT quarter's end instead,
+  // so this reads the nightly daily_snapshots row closest to (at or before)
+  // the window's end date. Snapshot history only starts once the nightly
+  // snapshot job began running, so a window ending before the earliest
+  // snapshot (or a future quarter that hasn't started, where start > end)
+  // has no historical record — those cases return null rather than silently
+  // reusing today's figure.
+  const windowIsValid = winStartMs <= winEndMs;
+  const occSnapAsOfWin = windowIsValid
+    ? queryOne(`SELECT total_units, occupied_units FROM daily_snapshots WHERE date <= ? AND total_units > 0 ORDER BY date DESC LIMIT 1`, [winEndIso])
+    : null;
+  const occupancyRateAsOfWindow = occSnapAsOfWin
+    ? Math.round((occSnapAsOfWin.occupied_units / occSnapAsOfWin.total_units) * 1000) / 10
+    : null;
+  const delinqSnapAsOfWin = windowIsValid
+    ? queryOne(`SELECT delinquent_total, total_expected_rent FROM daily_snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1`, [winEndIso])
+    : null;
+  const delinquencyRateAsOfWindow = (delinqSnapAsOfWin && delinqSnapAsOfWin.total_expected_rent > 0)
+    ? Math.round((delinqSnapAsOfWin.delinquent_total / delinqSnapAsOfWin.total_expected_rent) * 1000) / 10
+    : null;
 
   // ── LEASING ────────────────────────────────────────────────────────────
   const fixedLeases = queryOne(`SELECT COUNT(*) as c FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND p.is_active = 1 AND (l.type = 'Fixed' OR l.type = 'FixedWithRollover')`)?.c || 0;
@@ -583,14 +602,12 @@ export async function buildDashboard(win) {
   const sortedDom = [...dom].sort((a, b) => a - b);
   const medianDaysOnMarket = sortedDom.length ? sortedDom[Math.floor(sortedDom.length / 2)] : 0;
 
-  // Roll-ups across ALL RE units in the trailing 12 months (calls, texts,
-  // applications) from the same per-unit reporting endpoint.
-  let totalCalls = 0, totalTexts = 0, appsRequestedRE = 0, appsSubmittedRE = 0;
+  // Roll-ups across ALL RE units for the selected window (calls, texts)
+  // from the same per-unit reporting endpoint.
+  let totalCalls = 0, totalTexts = 0;
   for (const p of perfByUnit.values()) {
-    totalCalls        += p.total_calls || 0;
-    totalTexts        += p.outbound_texts || 0;
-    appsRequestedRE   += p.applications_requested || 0;
-    appsSubmittedRE   += p.applications_submitted || 0;
+    totalCalls += p.total_calls || 0;
+    totalTexts += p.outbound_texts || 0;
   }
   // ── Showing completion — row-level, split by method ──────────────────
   // Data source: /reporting/showings (row-level API, chunked into <=30-day
@@ -604,7 +621,7 @@ export async function buildDashboard(win) {
   // Build address → showing_method map from RE units.
   const unitMethodByAddr = new Map();
   for (const u of reUnits) {
-    const addr = normalizeAddr(u?.address?.formatted_address);
+    const addr = normalizeAddr(u?.formatted_address);
     if (addr) unitMethodByAddr.set(addr, u.showing_method || null);
   }
   if (reAccountIds.length === 0) {
@@ -794,7 +811,7 @@ export async function buildDashboard(win) {
   // MAINTENANCE_CATEGORY_PREFIXES near the top). If no active vendor matches a
   // maintenance category, fall back to all active vendors so the metric never
   // silently empties out.
-  const activeVendors = (bdVendors || []).filter(v => v.IsActive !== false);
+  const activeVendors = (bdVendors || []).filter(v => !!v.is_active);
   const maintenanceVendors = activeVendors.filter(isMaintenanceVendor);
   const usingMaintenanceScope = maintenanceVendors.length > 0;
   const scopedVendors = usingMaintenanceScope ? maintenanceVendors : activeVendors;
@@ -803,23 +820,15 @@ export async function buildDashboard(win) {
     : "all active vendors (no maintenance categories found)";
   if (scopedVendors.length) {
     const compliant = scopedVendors.filter(v => {
-      const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
-      const ins = v.VendorInsurance || v.VendorMessage?.VendorInsurance;
-      const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
-      const insExp = ins?.ExpirationDate ? new Date(ins.ExpirationDate).getTime() : 0;
+      const hasTax = !!(v.tax_payer_id && String(v.tax_payer_id).trim());
+      const insExp = v.insurance_expiration_date ? new Date(v.insurance_expiration_date).getTime() : 0;
       return hasTax && insExp > todayMs;
     }).length;
     vendorCompliancePct = Math.round((compliant / scopedVendors.length) * 1000) / 10;
 
-    const v1099 = scopedVendors.filter(v => {
-      const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
-      return tax && tax.IncludeIn1099 === true;
-    });
+    const v1099 = scopedVendors.filter(v => !!v.include_in_1099);
     if (v1099.length) {
-      const ok = v1099.filter(v => {
-        const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
-        return !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
-      }).length;
+      const ok = v1099.filter(v => !!(v.tax_payer_id && String(v.tax_payer_id).trim())).length;
       vendor1099Pct = Math.round((ok / v1099.length) * 1000) / 10;
     }
   }
@@ -834,8 +843,16 @@ export async function buildDashboard(win) {
   let reconTotalDone = 0;
   let reconTotalExpected = 0;
   const reconRowsRaw = [];
-  const bankAccounts = await safe(buildium.listBankAccounts(), []);
-  const activeBankAccounts = (bankAccounts || []).filter(b => b.IsActive !== false && b.GLAccount?.IsActive !== false);
+  // Bank accounts + reconciliations are synced nightly (sync.js
+  // syncBankAccounts/syncReconciliations) — no live Buildium call here.
+  // bankAccountsFetchFailed now means "the bank_accounts table itself is
+  // empty," i.e. sync has never successfully populated it (vs. a normal
+  // "zero ACTIVE accounts" state, which is a real, different condition) —
+  // distinguishes a genuine sync gap from a legitimately-filtered-to-zero
+  // result for the summary text below.
+  const bankAccountsTotalCount = queryOne(`SELECT COUNT(*) as c FROM bank_accounts`)?.c || 0;
+  const bankAccountsFetchFailed = bankAccountsTotalCount === 0;
+  const activeBankAccounts = query(`SELECT id, name, balance, is_active FROM bank_accounts WHERE is_active = 1 AND gl_account_is_active = 1`);
   let reconExcludedCount = 0;
   // Completed calendar months (YYYY-MM) whose month-end falls within the window
   // and on/before today.
@@ -852,14 +869,23 @@ export async function buildDashboard(win) {
     }
   }
   if (activeBankAccounts.length) {
-    const reconLists = await pMap(activeBankAccounts, 5, b => safe(buildium.listReconciliations(b.Id), []));
-    activeBankAccounts.forEach((b, i) => {
-      const finished = (reconLists[i] || []).filter(r => r.IsFinished);
-      finished.sort((a, c) => (c.StatementEndingDate || "").localeCompare(a.StatementEndingDate || ""));
-      const doneMonths = new Set(finished.map(r => (r.StatementEndingDate || "").slice(0, 7)));
+    const bankAccountIds = activeBankAccounts.map(b => b.id);
+    const reconRows = query(
+      `SELECT bank_account_id, statement_ending_date, is_finished FROM reconciliations WHERE bank_account_id IN (${bankAccountIds.map(() => "?").join(",")})`,
+      bankAccountIds
+    );
+    const reconByBank = new Map();
+    for (const r of reconRows) {
+      if (!reconByBank.has(r.bank_account_id)) reconByBank.set(r.bank_account_id, []);
+      reconByBank.get(r.bank_account_id).push(r);
+    }
+    activeBankAccounts.forEach((b) => {
+      const finished = (reconByBank.get(b.id) || []).filter(r => r.is_finished);
+      finished.sort((a, c) => (c.statement_ending_date || "").localeCompare(a.statement_ending_date || ""));
+      const doneMonths = new Set(finished.map(r => (r.statement_ending_date || "").slice(0, 7)));
       const monthsDone = expectedMonths.filter(m => doneMonths.has(m)).length;
-      const balance = Number(b.Balance) || 0;
-      const name = b.GLAccount?.Name || b.Name || `#${b.Id}`;
+      const balance = Number(b.balance) || 0;
+      const name = b.name;
       // Exclude accounts with NOTHING to reconcile: zero finished reconciliations
       // AND a zero balance (e.g. a backup card used twice in a year, no balance).
       // Those months are neither expected nor missed — drop them from the
@@ -873,7 +899,7 @@ export async function buildDashboard(win) {
       }
       reconTotalExpected += expectedMonths.length;
       reconTotalDone += monthsDone;
-      reconRowsRaw.push({ name, lastFinished: finished[0]?.StatementEndingDate || null, monthsDone, balance, excluded: false });
+      reconRowsRaw.push({ name, lastFinished: finished[0]?.statement_ending_date || null, monthsDone, balance, excluded: false });
     });
     if (reconTotalExpected > 0) {
       reconAccuracyPct = Math.round((reconTotalDone / reconTotalExpected) * 1000) / 10;
@@ -883,9 +909,8 @@ export async function buildDashboard(win) {
 
   // ── RENT PROCESSING ACCURACY ───────────────────────────────────────────
   // For every active lease, count Payment vs ReversePayment transactions inside
-  // the selected window. accuracy = 1 − (reversals ÷ payments). Throttled
-  // to concurrency 5 to stay under Buildium's rate limit. Adds ~30–60s per
-  // full sync; cached for 10 min.
+  // the selected window. accuracy = 1 − (reversals ÷ payments). Reads from
+  // the locally synced lease_transactions table — no live Buildium call here.
   let rentProcessingPct = null;
   let rpPayments = 0;
   let rpReversals = 0;             // total reversals (operational + NSF)
@@ -895,35 +920,38 @@ export async function buildDashboard(win) {
   const nsfReversalRowsRaw = [];   // NSF / bounced rent (informational only)
   // NSF / bounced-payment language seen on a reversal memo or its matching fee.
   const NSF_RE = /\b(nsf|returned|bounced|insufficient|non-?sufficient|charge\s*-?\s*back|chargeback|declined)\b/i;
-  const activeLeasesForRP = allLeasesAPI.filter(l => l.LeaseStatus === "Active");
+  const activeLeasesForRP = query(`SELECT l.id, l.property_id, u.unit_number FROM leases l LEFT JOIN units u ON u.id = l.unit_id WHERE l.status = 'Active'`);
   if (activeLeasesForRP.length) {
-    const rpTxnLists = await pMap(activeLeasesForRP, 5, l => safe(buildium.leaseTransactions(l.Id), []));
-    activeLeasesForRP.forEach((lease, i) => {
-      const txs = (rpTxnLists[i] || []).filter(t => t.Date && t.Date >= winStartIso && t.Date <= winEndIso);
+    const rpTxns = query(`SELECT lease_id, date, type, memo, journal_memo, amount FROM lease_transactions WHERE date >= ? AND date <= ?`, [winStartIso, winEndIso]);
+    const rpTxnsByLease = new Map();
+    for (const t of rpTxns) {
+      if (!rpTxnsByLease.has(t.lease_id)) rpTxnsByLease.set(t.lease_id, []);
+      rpTxnsByLease.get(t.lease_id).push(t);
+    }
+    activeLeasesForRP.forEach((lease) => {
+      const txs = rpTxnsByLease.get(lease.id) || [];
       // Dates of NSF-related charges/fees on this lease, used to flag a reversal
       // that has no NSF text on itself but is paired with an NSF fee nearby.
       const nsfFeeDates = txs
         .filter(t => {
-          const ty = t.TransactionTypeEnum || t.TransactionType;
-          const memo = `${t.Memo || ""} ${t.Journal?.Memo || ""}`;
-          return (ty === "Charge" || ty === "Fee") && NSF_RE.test(memo);
+          const memo = `${t.memo || ""} ${t.journal_memo || ""}`;
+          return (t.type === "Charge" || t.type === "Fee") && NSF_RE.test(memo);
         })
-        .map(t => new Date(t.Date).getTime());
+        .map(t => new Date(t.date).getTime());
       for (const t of txs) {
-        const type = t.TransactionTypeEnum || t.TransactionType;
-        if (type === "Payment") rpPayments++;
-        else if (type === "ReversePayment") {
+        if (t.type === "Payment") rpPayments++;
+        else if (t.type === "ReversePayment") {
           rpReversals++;
-          const memo = `${t.Memo || ""} ${t.Journal?.Memo || ""}`.trim();
-          const tMs = new Date(t.Date).getTime();
+          const memo = `${t.memo || ""} ${t.journal_memo || ""}`.trim();
+          const tMs = new Date(t.date).getTime();
           const memoNsf = NSF_RE.test(memo);
           const nearNsfFee = nsfFeeDates.some(d => Math.abs(d - tMs) <= 5 * 86400000);
           const isNsf = memoNsf || nearNsfFee;  // unclassifiable reversals stay counted
           const row = {
-            propertyId: lease.PropertyId,
-            unitNumber: lease.UnitNumber,
-            date: t.Date,
-            amount: Math.abs(Number(t.TotalAmount) || 0),
+            propertyId: lease.property_id,
+            unitNumber: lease.unit_number,
+            date: t.date,
+            amount: Math.abs(Number(t.amount) || 0),
             memo,
             reason: memoNsf ? "NSF memo" : (nearNsfFee ? "matched NSF fee" : ""),
           };
@@ -977,6 +1005,10 @@ export async function buildDashboard(win) {
     rentIncreaseDistribution: [], rentCollectionDetail: [], doorsAddedDetail: [],
     goiByYear, rpuByYear, grossByYear, netByYear,
     roleKpis,
+    // As-of-quarter-end figures for Team Performance's PM scorecard only —
+    // see the comment above their computation. Not used by any main
+    // dashboard tile (those stay always-as-of-today via `occupancy`/roleKpis).
+    teamPerfAsOfWindow: { occupancyRate: occupancyRateAsOfWindow, delinquencyRate: delinquencyRateAsOfWindow },
   };
 
   // ── DRILLDOWNS (simplified — full list for each tile) ──────────────────
@@ -984,7 +1016,7 @@ export async function buildDashboard(win) {
   const propName = pid => propMap.get(pid) || `#${pid || "—"}`;
   // RentEngine units carry a full postal address (with unit) under `address`.
   // Prefer the human-readable address over the opaque numeric RentEngine id.
-  const reAddr = u => u?.address?.formatted_address || `#${u?.id ?? "—"}`;
+  const reAddr = u => u?.formatted_address || `#${u?.id ?? "—"}`;
   const notWired = (title, reason) => ({ title, cols: ["Note"], rows: [[reason]], summary: "No data" });
   const activeLeaseRows = query(`SELECT l.id, l.property_id, u.unit_number, l.rent, l.type, l.from_date, l.to_date FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE l.status = 'Active' AND p.is_active = 1 ORDER BY l.rent DESC LIMIT 500`);
 
@@ -1039,7 +1071,7 @@ export async function buildDashboard(win) {
     rentCollectedBy3rd: { title: "Rent by 3rd", cols: ["Note"], rows: [["Snapshots accumulate over time."]], summary: `${by3rd.value}% (${by3rd.monthsCounted} months)` },
     rentCollectedBy10th: { title: "Rent by 10th", cols: ["Note"], rows: [["Snapshots accumulate over time."]], summary: `${by10th.value}% (${by10th.monthsCounted} months)` },
     newProspects: { title: "Prospects", cols: ["Name", "Source", "Created"], rows: reProspects.slice(-200).reverse().map(p => [p.name || "—", p.source || "—", (p.created_at || "").slice(0, 10)]), summary: `${newProspects} prospects` },
-    appsSubmitted: { title: `Applications submitted — ${winLabel}`, cols: ["Applicant", "Status", "App #", "Submitted"], rows: submittedApps.slice().sort((x, y) => (y.app.ApplicationSubmittedDateTime || "").localeCompare(x.app.ApplicationSubmittedDateTime || "")).slice(0, 500).map(({ applicant, app }) => [`${applicant.FirstName || ""} ${applicant.LastName || ""}`.trim() || "—", app.ApplicationStatus || applicant.Status || "—", app.ApplicationNumber || String(app.Id || ""), (app.ApplicationSubmittedDateTime || "").slice(0, 10)]), summary: `${appsSubmitted} applications submitted` },
+    appsSubmitted: { title: `Applications submitted — ${winLabel}`, cols: ["Applicant", "Status", "App #", "Submitted"], rows: submittedApps.slice().sort((x, y) => (y.submitted_at || "").localeCompare(x.submitted_at || "")).slice(0, 500).map(r => [`${r.applicant_first_name || ""} ${r.applicant_last_name || ""}`.trim() || "—", r.status || "—", r.application_number || String(r.id || ""), (r.submitted_at || "").slice(0, 10)]), summary: `${appsSubmitted} applications submitted` },
     moveins: { title: `Move-ins — ${winLabel}`, cols: ["Property", "Unit", "Start"], rows: query(`SELECT l.from_date, l.property_id, u.unit_number FROM leases l JOIN units u ON l.unit_id = u.id JOIN properties p ON u.property_id = p.id WHERE p.is_active = 1 AND l.status != 'Future' AND l.from_date >= ? AND l.from_date <= ? ORDER BY l.from_date DESC LIMIT 200`, [winStartIso, winEndIso]).map(r => [propName(r.property_id), r.unit_number || "—", r.from_date || "—"]), summary: `${moveins} move-ins` },
     appsPerMovein: { title: "Funnel", cols: ["Stage", "Count"], rows: [["Apps", String(appsSubmitted)], ["Move-ins", String(moveins)], ["Ratio", moveins ? (appsSubmitted / moveins).toFixed(1) : "—"]], summary: moveins ? `${(appsSubmitted / moveins).toFixed(1)} apps per move-in` : "—" },
     completionRate: { title: `Showing completion — all methods — ${winLabel}`, cols: ["Address", "Status", "Method", "Date"], rows: allShowingDrillRows.slice(0, 500), summary: `${showingsCompleted}/${showingsScheduled} = ${completionRate}% (blended)`, note: `Row-level data from RentEngine /reporting/showings. Counts "Showing Complete" as completed; "Showing Canceled" and "Missed Showing" as not completed. Method matched from unit.showing_method by address.` },
@@ -1138,8 +1170,12 @@ export async function buildDashboard(win) {
       ]),
       summary: reconAccuracyPct != null
         ? `${reconTotalDone} / ${reconTotalExpected} expected reconciliations completed = ${reconAccuracyPct}%${reconExcludedCount ? ` · ${reconExcludedCount} excluded (no activity)` : ""} · target 100%`
-        : (expectedMonths.length ? "No active bank accounts found" : "No completed months in this period yet"),
-      note: `Formula: across active bank accounts, count how many of the ${expectedMonths.length} completed month(s) inside ${winLabel} have a finished reconciliation (StatementEndingDate falls in that month and IsFinished=true). Accuracy = done ÷ expected. A partial current month is not yet reconcilable and is not counted. Accounts with ZERO finished reconciliations AND a $0 balance are excluded entirely (nothing to reconcile) — ${reconExcludedCount} excluded. An account with a nonzero balance but no reconciliation still counts as a miss. Source: Buildium /v1/bankaccounts (Balance, IsActive) and /v1/bankaccounts/{id}/reconciliations.`,
+        : (bankAccountsFetchFailed
+            ? "Data not synced yet — bank accounts haven't been synced from Buildium"
+            : (expectedMonths.length ? "No active bank accounts found" : "No completed months in this period yet")),
+      note: bankAccountsFetchFailed
+        ? `The local bank_accounts table is empty, meaning a sync hasn't successfully populated it yet (this is a sync gap, not a real "zero accounts" state — run a sync to populate it). Formula otherwise: across active bank accounts, count how many of the ${expectedMonths.length} completed month(s) inside ${winLabel} have a finished reconciliation (StatementEndingDate falls in that month and IsFinished=true). Accuracy = done ÷ expected.`
+        : `Formula: across active bank accounts, count how many of the ${expectedMonths.length} completed month(s) inside ${winLabel} have a finished reconciliation (StatementEndingDate falls in that month and IsFinished=true). Accuracy = done ÷ expected. A partial current month is not yet reconcilable and is not counted. Accounts with ZERO finished reconciliations AND a $0 balance are excluded entirely (nothing to reconcile) — ${reconExcludedCount} excluded. An account with a nonzero balance but no reconciliation still counts as a miss. Source: bank_accounts/reconciliations tables, synced nightly from Buildium /v1/bankaccounts and /v1/bankaccounts/{id}/reconciliations.`,
     },
     kpiRentProcessing: {
       title: "Rent Processing Accuracy",
@@ -1170,10 +1206,8 @@ export async function buildDashboard(win) {
     kpiVendorCompliance: (() => {
       const todayMsLocal = todayMs;
       const rows = scopedVendors.map(v => {
-        const tax = v.TaxInformation || v.VendorTaxInformation || v.VendorMessage?.TaxInformation;
-        const ins = v.VendorInsurance || v.VendorMessage?.VendorInsurance;
-        const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
-        const expDate = ins?.ExpirationDate || "";
+        const hasTax = !!(v.tax_payer_id && String(v.tax_payer_id).trim());
+        const expDate = v.insurance_expiration_date || "";
         const expMs = expDate ? new Date(expDate).getTime() : 0;
         const insOk = expMs > todayMsLocal;
         const compliant = hasTax && insOk;
@@ -1181,9 +1215,8 @@ export async function buildDashboard(win) {
         if (!hasTax) reasons.push("missing TaxPayerId");
         if (!expDate) reasons.push("no insurance on file");
         else if (!insOk) reasons.push(`insurance expired ${expDate.slice(0, 10)}`);
-        const name = v.CompanyName || `${v.FirstName || ""} ${v.LastName || ""}`.trim() || `#${v.Id}`;
         return {
-          name,
+          name: v.name,
           category: readVendorCategory(v) || "—",
           hasTax, expDate: expDate ? expDate.slice(0, 10) : "—", insOk, compliant,
           status: compliant ? "compliant" : reasons.join(" + "),
@@ -1200,15 +1233,10 @@ export async function buildDashboard(win) {
       };
     })(),
     kpi1099Compliance: (() => {
-      const rows = scopedVendors.filter(v => {
-        const tax = v.TaxInformation || v.VendorTaxInformation || v.VendorMessage?.TaxInformation;
-        return tax && tax.IncludeIn1099 === true;
-      }).map(v => {
-        const tax = v.TaxInformation || v.VendorTaxInformation || v.VendorMessage?.TaxInformation;
-        const hasTax = !!(tax?.TaxPayerId && String(tax.TaxPayerId).trim());
-        const name = v.CompanyName || `${v.FirstName || ""} ${v.LastName || ""}`.trim() || `#${v.Id}`;
-        const taxType = tax?.TaxPayerIdType || "—";
-        return { name, category: readVendorCategory(v) || "—", hasTax, taxType, status: hasTax ? "compliant" : "missing TaxPayerId" };
+      const rows = scopedVendors.filter(v => !!v.include_in_1099).map(v => {
+        const hasTax = !!(v.tax_payer_id && String(v.tax_payer_id).trim());
+        const taxType = v.tax_payer_id_type || "—";
+        return { name: v.name, category: readVendorCategory(v) || "—", hasTax, taxType, status: hasTax ? "compliant" : "missing TaxPayerId" };
       });
       rows.sort((a, b) => Number(a.hasTax) - Number(b.hasTax) || a.name.localeCompare(b.name));
       const okCount = rows.filter(r => r.hasTax).length;
@@ -1224,7 +1252,7 @@ export async function buildDashboard(win) {
 
   let lsKpis = null, lsDrilldowns = {}, lsSummary = null;
   try {
-    const ls = buildLeadSimpleKpis();
+    const ls = buildLeadSimpleKpis(win);
     lsKpis = ls.lsKpis;
     lsDrilldowns = ls.lsDrilldowns;
     lsSummary = ls.lsSummary;
@@ -1232,10 +1260,21 @@ export async function buildDashboard(win) {
     console.warn("[agg] LeadSimple KPIs failed:", err.message);
   }
 
-  // Team Performance (bonus calculator)
+  // Team Performance (bonus calculator). Only record a quarterly snapshot
+  // (team_perf_snapshots, which drives the quarter-over-quarter trend chart)
+  // when the window actually being computed IS the real current calendar
+  // quarter — otherwise viewing e.g. "Last month" or a past Q1/Q2 would
+  // overwrite the current quarter's trend row with a different period's
+  // numbers every time someone views something other than "now".
+  const realCurrentQKey = `q${Math.floor(now.getUTCMonth() / 3) + 1}`;
+  const isCurrentQuarterView = winKey === "currentQuarter" || winKey === realCurrentQKey;
   let teamPerformance = null;
   try {
-    teamPerformance = buildTeamPerformance({ ...dashboard, lsKpis, lsSummary }, lsKpis);
+    teamPerformance = buildTeamPerformance({ ...dashboard, lsKpis, lsSummary }, lsKpis, {
+      recordSnapshot: isCurrentQuarterView, windowLabel: winLabel,
+      inProgress: win.inProgress || false,
+      quarterEnd: win.quarterEnd ? win.quarterEnd.toISOString().slice(0, 10) : null,
+    });
   } catch (err) {
     console.warn("[agg] Team Performance failed:", err.message);
   }

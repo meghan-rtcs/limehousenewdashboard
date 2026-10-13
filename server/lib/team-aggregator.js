@@ -28,13 +28,28 @@ function extractValues(dashboard, lsKpis) {
   // Build the flat value map
   return {
     // ── Portfolio Manager ──
-    occupancyRate: dashboard?.occupancy?.rate?.value ?? null,
+    // Occupancy/delinquency read from teamPerfAsOfWindow (as-of the selected
+    // quarter's end date, via daily_snapshots), NOT dashboard.occupancy /
+    // roleKpis (which are always as-of-today and would score every quarter
+    // identically). Null when the quarter predates snapshot history or
+    // hasn't started yet.
+    occupancyRate: dashboard?.teamPerfAsOfWindow?.occupancyRate ?? null,
     renewalRate: lsVal("PM", "Lease Renewal Rate"),
     daysOnMarket: dashboard?.marketing?.avgDaysOnMarket?.value ?? null,
-    delinquencyRate: extractFromRoleKpis(dashboard?.roleKpis, "PM", "Delinquency Rate"),
+    delinquencyRate: dashboard?.teamPerfAsOfWindow?.delinquencyRate ?? null,
 
     // ── Portfolio Assistant ──
-    showingCompletionRate: extractFromRoleKpis(dashboard?.roleKpis, "APM", "Showing Completion Rate"),
+    // Read straight off dashboard.marketing — the same field the main dashboard
+    // tiles use (var-a.jsx SD.marketing.completionRate*) — rather than roleKpis,
+    // whose KPI is named "Showing Completion — Accompanied", not "Showing
+    // Completion Rate", so the old roleKpis lookup here never matched.
+    // `|| null` mirrors roleKpis' prior convention of treating a 0% rate (no
+    // showings to compute a denominator from) as "no data" rather than a real 0.
+    showingCompletionRate: dashboard?.marketing?.completionRateAccompanied?.value || null,
+    // Self-guided is visibility-only (see aggregator.js note: cancellations there
+    // are prospect-driven, outside the team's control) — surfaced as an info
+    // metric below, never as a scored accountability KPI.
+    showingCompletionRateSelfGuided: dashboard?.marketing?.completionRateSelfGuided?.value || null,
     propertyReadinessRate: lsVal("APM", "Property Readiness"),
     paResidentResponseHours: lsVal("APM", "Resident Response Time"),
 
@@ -66,17 +81,18 @@ function extractFromRoleKpis(roleKpis, roleAbbrev, kpiName) {
 }
 
 // ── Main builder ────────────────────────────────────────────────────────────
-export function buildTeamPerformance(dashboard, lsKpis) {
+export function buildTeamPerformance(dashboard, lsKpis, { recordSnapshot = true, windowLabel = null, inProgress = false, quarterEnd = null } = {}) {
   const values = extractValues(dashboard, lsKpis);
   const now = new Date();
-  const quarter = Math.floor(now.getMonth() / 3) + 1;
-  const year = now.getFullYear();
+  const quarter = Math.floor(now.getUTCMonth() / 3) + 1;
+  const year = now.getUTCFullYear();
 
   const roles = BONUS_ROLES.map(role => {
     if (role.placeholder) {
       return {
         ...role,
         kpiResults: [],
+        infoResults: [],
         bonus: { total: 0, max: 0, slotValue: 0, slots: [] },
         totalScore: 0,
         maxScore: 0,
@@ -95,6 +111,13 @@ export function buildTeamPerformance(dashboard, lsKpis) {
       };
     });
 
+    // Visibility-only metrics — looked up the same way but never scored and
+    // never fed into calculateBonus, so they can't shift the bonus slot math.
+    const infoResults = (role.infoKpis || []).map(kpi => ({
+      ...kpi,
+      actual: values[kpi.dataKey],
+    }));
+
     // Calculate bonus
     const scores = kpiResults.map(k => ({ score: k.score, label: k.label, tier: k.tier }));
     const bonus = calculateBonus(role, scores);
@@ -110,6 +133,7 @@ export function buildTeamPerformance(dashboard, lsKpis) {
       abbrev: role.abbrev,
       maxBonus: role.maxBonus,
       kpiResults,
+      infoResults,
       bonus,
       totalScore,
       maxScore,
@@ -118,9 +142,15 @@ export function buildTeamPerformance(dashboard, lsKpis) {
   });
 
   // Persist this quarter's standing (idempotent upsert) and build the
-  // quarter-over-quarter trend across every recorded quarter.
-  try { recordTeamSnapshot(year, quarter, now, roles); }
-  catch (e) { console.error("[team] snapshot record failed:", e.message); }
+  // quarter-over-quarter trend across every recorded quarter. Only do this
+  // when the caller confirms the window just computed actually represents
+  // the current calendar quarter — otherwise (e.g. viewing "Last month" or a
+  // past Q1/Q2 via the Team Performance selector) this would overwrite the
+  // current quarter's trend row with a different period's numbers.
+  if (recordSnapshot) {
+    try { recordTeamSnapshot(year, quarter, now, roles); }
+    catch (e) { console.error("[team] snapshot record failed:", e.message); }
+  }
 
   let trend = null;
   try { trend = buildTeamTrend(); }
@@ -129,8 +159,18 @@ export function buildTeamPerformance(dashboard, lsKpis) {
   return {
     quarter: `Q${quarter}`,
     year,
-    quarterLabel: `Q${quarter} ${year}`,
+    // Displayed header reflects whichever window was actually requested
+    // (e.g. "Q1 2026 · Jan 1 – Mar 31, 2026" when the tab's own Q1 selector
+    // is used) — NOT always the real current quarter, since that would be
+    // wrong the moment a past quarter is selected. Falls back to the real
+    // current quarter's label if the caller didn't pass one.
+    quarterLabel: windowLabel || `Q${quarter} ${year}`,
     asOf: now.toISOString().slice(0, 10),
+    // Set only when the selected quarter hasn't finished yet (its real end
+    // date is still in the future) — drives the "still accumulating" banner
+    // on the Team Performance tab so numbers aren't mistaken for final.
+    inProgress,
+    quarterEnd,
     roles,
     trend,
   };

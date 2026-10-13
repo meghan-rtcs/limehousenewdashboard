@@ -104,6 +104,21 @@ export const BONUS_ROLES = [
         drillKey: "lsResidentResponseAPM",
       },
     ],
+    // Visibility-only metrics: shown on Team Performance but never scored and
+    // never part of the bonus slot math (kpis.length above stays 3, slotValue
+    // stays maxBonus/3). Self-guided showing cancellations are prospect-driven,
+    // not something the team controls, so it's not an accountability target.
+    infoKpis: [
+      {
+        id: "pa_showing_sg",
+        name: "Showing Completion — Self-Guided",
+        definition: "% of self-guided showings completed (visibility only — not a bonus target)",
+        format: "pct",
+        sources: ["RentEngine"],
+        dataKey: "showingCompletionRateSelfGuided",
+        drillKey: "completionRateSelfGuided",
+      },
+    ],
   },
   {
     id: "bk",

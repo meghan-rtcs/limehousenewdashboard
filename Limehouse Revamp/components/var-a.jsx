@@ -364,6 +364,16 @@ const VarA = (function() {
     BD: { bg:'#e8e0d4', fg:'#6b5b3e' },
     RE: { bg:'#dbeafe', fg:'#1e40af' },
   };
+  // These KPIs are structural (always "as of today") rather than scoped to
+  // whichever period is selected up top — flagged so that doesn't read as a
+  // broken filter. Keep in sync with the comment above roleKpis in
+  // server/lib/aggregator.js.
+  const ROLE_KPI_WINDOW_NOTE = {
+    'Portfolio Occupancy Rate': 'as of today',
+    'Delinquency Rate': 'as of today',
+    'Vendor Compliance': 'as of today',
+    '1099 Compliance': 'as of today',
+  };
   function fmtKpiValue(kpi) {
     if (kpi.value == null) return { num:'—', suffix:'' };
     const v = kpi.value;
@@ -451,6 +461,12 @@ const VarA = (function() {
                     <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
                       <span style={{ fontSize:12, fontWeight:500, color:'#1c2119' }}>{kpi.name}</span>
                       <span style={{ background:src.bg, color:src.fg, fontSize:9, fontWeight:700, padding:'1px 6px', borderRadius:3, letterSpacing:'0.04em' }}>{kpi.source}</span>
+                      {ROLE_KPI_WINDOW_NOTE[kpi.name] && (
+                        <span title="This value doesn't change when you switch periods — it's not scoped to a specific date range."
+                          style={{ background:'#eef0eb', color:'#6b7566', fontSize:9, fontWeight:600, padding:'1px 6px', borderRadius:3, letterSpacing:'0.02em', fontStyle:'italic' }}>
+                          {ROLE_KPI_WINDOW_NOTE[kpi.name]}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div style={{ textAlign:'right', flexShrink:0 }}>
@@ -475,7 +491,6 @@ const VarA = (function() {
     if (!data || !data.roles) return null;
     return (
       <div style={{ marginTop: mobile ? 18 : 26 }}>
-        <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#9aa595', margin:'4px 0 10px' }}>Performance by Role · tap any KPI to see the data behind it</div>
         <RoleSummaryBar roles={data.roles} mobile={mobile} />
         <div style={{ display:'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: mobile ? 10 : 12 }}>
           {data.roles.map(r => <RoleCard key={r.abbrev} role={r} mobile={mobile} setDrillKey={setDrillKey} />)}
@@ -502,6 +517,20 @@ const VarA = (function() {
     RentEngine:  { bg: '#dbeafe', fg: '#1e40af' },
     LeadSimple:  { bg: '#e0e8f0', fg: '#2c5282' },
     SharePoint:  { bg: '#ede9fe', fg: '#5b3e8a' },
+  };
+
+  // KPIs whose value is structural (always "as of today", no historical
+  // source to backdate) or a long rolling window (trailing 12 months) rather
+  // than scoped to the selected quarter — these will read identically no
+  // matter which Q1–Q4 button is clicked, by design. Occupancy/delinquency
+  // are NOT in this list: they're backdated to the quarter's end date via
+  // daily_snapshots (see teamPerfAsOfWindow in server/lib/aggregator.js).
+  // Keep this in sync with server/lib/team-aggregator.js's extractValues().
+  const KPI_WINDOW_NOTE = {
+    daysOnMarket: 'as of today',
+    renewalRate: 'trailing 12 mo',
+    vendorCompliancePct: 'as of today',
+    vendor1099Pct: 'as of today',
   };
 
   function fmtActual(kpi) {
@@ -554,6 +583,12 @@ const VarA = (function() {
               const st = SRC_BADGE[s] || SRC_BADGE.Buildium;
               return <span key={s} style={{ background: st.bg, color: st.fg, fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 3, letterSpacing: '0.03em' }}>{s === 'RentEngine' ? 'RE' : s === 'LeadSimple' ? 'LS' : s === 'Buildium' ? 'BD' : s}</span>;
             })}
+            {KPI_WINDOW_NOTE[kpi.dataKey] && (
+              <span title="This value doesn't change when you switch quarters — it's not scoped to a specific period."
+                style={{ background: '#eef0eb', color: '#6b7566', fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3, letterSpacing: '0.02em', fontStyle: 'italic' }}>
+                {KPI_WINDOW_NOTE[kpi.dataKey]}
+              </span>
+            )}
           </div>
           {/* Per-KPI quarter trend dots (shown once 2+ quarters exist) */}
           {kpiTrend && quarters && quarters.length >= 2 && (
@@ -597,6 +632,37 @@ const VarA = (function() {
           <span style={{ fontSize: mobile ? 12 : 13, fontWeight: 600, color: '#1c2119' }}>
             {slot?.payout != null ? `$${slot.payout}` : '—'}
           </span>
+        </div>
+      </div>
+    );
+  }
+
+  // Renders a visibility-only metric: name + actual value + "info" badge, no
+  // target/score/payout columns since it isn't part of the bonus calculation.
+  function InfoMetricRow({ kpi, mobile, setDrillKey }) {
+    const [hover, setHover] = useState(false);
+    const clickable = !!(kpi.drillKey && setDrillKey);
+    return (
+      <div
+        onClick={clickable ? () => setDrillKey(kpi.drillKey) : undefined}
+        onMouseEnter={clickable ? () => setHover(true) : undefined}
+        onMouseLeave={clickable ? () => setHover(false) : undefined}
+        title={clickable ? 'View the exact records behind this metric' : undefined}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 10, padding: '10px 12px', background: clickable && hover ? '#f6f7f4' : 'transparent',
+          cursor: clickable ? 'pointer' : 'default', transition: 'background 0.12s',
+        }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: clickable && hover ? '#2E4057' : '#1c2119', lineHeight: 1.3 }}>
+            {kpi.name}
+            {clickable && <span style={{ marginLeft: 5, fontSize: 11, color: '#9aa595', fontWeight: 600 }}>{'›'}</span>}
+            <span style={{ marginLeft: 6, background: '#eef1ea', color: '#6b7566', fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 3, letterSpacing: '0.03em', textTransform: 'uppercase' }}>Info only</span>
+          </div>
+          <div style={{ fontSize: 11, color: '#9aa595', marginTop: 3 }}>{kpi.definition}</div>
+        </div>
+        <div style={{ fontSize: mobile ? 14 : 15, fontWeight: 600, color: '#6b7566', whiteSpace: 'nowrap' }}>
+          {fmtActual(kpi)}
         </div>
       </div>
     );
@@ -687,6 +753,20 @@ const VarA = (function() {
           ))}
         </div>
 
+        {/* Visibility-only metrics — not scored, not part of the bonus calc above */}
+        {role.infoResults && role.infoResults.length > 0 && (
+          <div style={{
+            background: '#fff', border: '1px solid #e5e8e2', borderRadius: 8,
+            marginTop: 8, overflow: 'hidden',
+          }}>
+            {role.infoResults.map((kpi, i) => (
+              <div key={kpi.id} style={{ borderBottom: i < role.infoResults.length - 1 ? '1px solid #f3f4f0' : 'none' }}>
+                <InfoMetricRow kpi={kpi} mobile={mobile} setDrillKey={setDrillKey} />
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Bonus calculator bar */}
         <div style={{
           background: '#f6f7f4', border: '1px solid #e5e8e2', borderRadius: 8,
@@ -737,12 +817,44 @@ const VarA = (function() {
     );
   }
 
+  const TEAM_QUARTERS = ['q1', 'q2', 'q3', 'q4'];
+
   function TeamPerformanceView({ mobile, setDrillKey }) {
     const [selectedRole, setSelectedRole] = useState(TEAM?.roles?.[0]?.id || 'pm');
     const [pw, setPw] = useState('');
     const [unlocked, setUnlocked] = useState(() => sessionStorage.getItem('limehouse_ceo') === '1');
     const [err, setErr] = useState(false);
-    const data = TEAM;
+
+    // Team Performance has its OWN period selector (Q1–Q4 of the current
+    // year), completely independent of the main dashboard's This Month/Last
+    // Month/etc. filter — these are bonus/accountability KPIs evaluated per
+    // quarter, not a live in-progress view. Defaults to whichever quarter
+    // "today" falls in.
+    const [teamRange, setTeamRange] = useState(() => {
+      const saved = sessionStorage.getItem('limehouse_team_range');
+      if (saved && TEAM_QUARTERS.includes(saved)) return saved;
+      return 'q' + (Math.floor(new Date().getMonth() / 3) + 1);
+    });
+    const [teamData, setTeamData] = useState(TEAM);
+    const [teamLoading, setTeamLoading] = useState(false);
+
+    useEffect(() => { sessionStorage.setItem('limehouse_team_range', teamRange); }, [teamRange]);
+
+    useEffect(() => {
+      let cancelled = false;
+      setTeamLoading(true);
+      fetch('/api/dashboard?period=' + encodeURIComponent(teamRange), { cache: 'no-store' })
+        .then(r => r.json())
+        .then(j => {
+          if (cancelled || !j || !j.dashboard) return;
+          setTeamData(j.dashboard.teamPerformance);
+        })
+        .catch(() => { /* keep showing the previous quarter's data on error */ })
+        .finally(() => { if (!cancelled) setTeamLoading(false); });
+      return () => { cancelled = true; };
+    }, [teamRange]);
+
+    const data = teamData;
 
     if (!unlocked) {
       return (
@@ -761,13 +873,40 @@ const VarA = (function() {
       );
     }
 
+    // Q1–Q4 selector — own to this tab, independent of the main dashboard filter.
+    const quarterSelector = (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: mobile ? 12 : 16 }}>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {TEAM_QUARTERS.map(q => {
+            const active = q === teamRange;
+            return (
+              <button key={q} onClick={() => setTeamRange(q)} style={{
+                background: active ? '#1c2119' : '#f6f7f4',
+                color: active ? '#fff' : '#6b7566',
+                border: active ? 'none' : '1px solid #e5e8e2',
+                fontSize: 11, fontWeight: active ? 600 : 500,
+                padding: '6px 13px', borderRadius: 6, cursor: 'pointer',
+                fontFamily: 'inherit', letterSpacing: '0.03em', textTransform: 'uppercase',
+              }}>
+                {q.toUpperCase()}
+              </button>
+            );
+          })}
+        </div>
+        {teamLoading && <span style={{ color: '#9aa595', fontStyle: 'italic', fontSize: 11.5 }}>updating…</span>}
+      </div>
+    );
+
     if (!data || !data.roles) {
       return (
-        <div style={{
-          minHeight: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          color: '#9aa595', fontSize: 13, fontStyle: 'italic',
-        }}>
-          Team performance data not yet loaded. Run a sync to populate.
+        <div style={{ padding: mobile ? '12px 12px 28px' : '18px 26px 32px', maxWidth: 1480, margin: '0 auto' }}>
+          {quarterSelector}
+          <div style={{
+            minHeight: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: '#9aa595', fontSize: 13, fontStyle: 'italic',
+          }}>
+            Team performance data not yet loaded. Run a sync to populate.
+          </div>
         </div>
       );
     }
@@ -775,7 +914,12 @@ const VarA = (function() {
     const role = data.roles.find(r => r.id === selectedRole) || data.roles[0];
 
     return (
-      <div style={{ padding: mobile ? '12px 12px 28px' : '18px 26px 32px', maxWidth: 1480, margin: '0 auto' }}>
+      <div style={{
+        padding: mobile ? '12px 12px 28px' : '18px 26px 32px', maxWidth: 1480, margin: '0 auto',
+        opacity: teamLoading ? 0.6 : 1, transition: 'opacity 0.15s',
+      }}>
+
+        {quarterSelector}
 
         {/* Header */}
         <div style={{
@@ -784,6 +928,24 @@ const VarA = (function() {
         }}>
           {data.quarterLabel} · as of {data.asOf}
         </div>
+
+        {/* In-progress quarter notice — the selected quarter hasn't ended yet,
+            so its numbers are still accumulating and aren't final. */}
+        {data.inProgress && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            background: '#fdf6e3', border: '1px solid #f0e0a8', borderRadius: 6,
+            padding: '9px 14px', marginBottom: mobile ? 12 : 16,
+            fontSize: 12.5, color: '#7a6420',
+          }}>
+            <span style={{ fontWeight: 700 }}>In progress</span>
+            <span>
+              {data.quarterEnd
+                ? `${data.quarterLabel} ends ${new Date(data.quarterEnd).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric' })} — data is still accumulating.`
+                : 'This quarter has not ended yet — data is still accumulating.'}
+            </span>
+          </div>
+        )}
 
         {/* Role selector */}
         <div style={{
@@ -939,6 +1101,11 @@ const VarA = (function() {
     const SD = payload.data;
     const DRILLD = payload.drill;
     const win = (SD.meta && SD.meta.window) || { label: RANGES[range].label, start: '', end: '' };
+    // While a new period's fetch is in flight, payload.data is still the OLD
+    // period's data — show the generic range label (known instantly from the
+    // click) instead of the stale server-computed window label, which would
+    // otherwise freeze on the previous period until the fetch resolves.
+    const periodLabel = range === payload.period ? (win.label || RANGES[range].label) : RANGES[range].label;
 
     // Set of drill keys backed by real, live API data (windowed flow metrics are
     // real server-computed numbers, so they qualify too).
@@ -992,7 +1159,7 @@ const VarA = (function() {
           display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
           fontSize: 11.5, color: '#6b7566',
         }}>
-          <span style={{ fontWeight: 600, color: '#1c2119', letterSpacing: '0.04em' }}>{(win.label || RANGES[range].label).toUpperCase()}</span>
+          <span style={{ fontWeight: 600, color: '#1c2119', letterSpacing: '0.04em' }}>{periodLabel.toUpperCase()}</span>
           {loading && <span style={{ color: '#9aa595', fontStyle: 'italic' }}>updating…</span>}
           <span style={{ color: '#cbd1c4' }}>·</span>
           <span>Flow metrics for this period; <b style={{ color: '#1c2119' }}>structural metrics shown as of today{SD.meta?.asOf ? ` (${SD.meta.asOf})` : ''}</b></span>
@@ -1007,7 +1174,10 @@ const VarA = (function() {
           )}
         </div>
 
-        <div style={{ padding: mobile ? '12px 12px 28px' : '18px 26px 32px', maxWidth: 1480, margin: '0 auto' }}>
+        <div style={{
+          padding: mobile ? '12px 12px 28px' : '18px 26px 32px', maxWidth: 1480, margin: '0 auto',
+          opacity: loading ? 0.5 : 1, transition: 'opacity 0.15s', pointerEvents: loading ? 'none' : 'auto',
+        }}>
 
           {/* HERO */}
           <div style={{

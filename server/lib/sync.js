@@ -1,6 +1,7 @@
 import { buildium } from "./buildium.js";
 import { rentengine } from "./rentengine.js";
-import { getDb, upsertMany, clearTable, run, query, queryOne } from "./db.js";
+import { getDb, upsertMany, clearTable, replaceTable, run, query, queryOne } from "./db.js";
+import { withRetry, pMap } from "./http-retry.js";
 
 const TS = () => new Date().toISOString();
 const fmtDate = (d) => (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10);
@@ -321,6 +322,316 @@ async function syncUnits() {
   return units;
 }
 
+// ── Bank accounts ────────────────────────────────────────────────────────────
+// Structural snapshot — no history needed. The retry/backoff here is what
+// actually stops the 429 storm: this call now runs once per sync (a handful
+// of times a day), not once per dashboard filter click.
+async function syncBankAccounts() {
+  const accounts = await withRetry(() => buildium.listBankAccounts());
+  const now = TS();
+  replaceTable("bank_accounts", accounts.map((b) => ({
+    id: b.Id,
+    name: b.GLAccount?.Name || b.Name || `#${b.Id}`,
+    gl_account_name: b.GLAccount?.Name || null,
+    gl_account_is_active: b.GLAccount?.IsActive !== false ? 1 : 0,
+    balance: Number(b.Balance) || 0,
+    is_active: b.IsActive !== false ? 1 : 0,
+    synced_at: now,
+  })), ["id", "name", "gl_account_name", "gl_account_is_active", "balance", "is_active", "synced_at"]);
+  console.log(`[sync] Bank accounts: ${accounts.length}`);
+  return accounts;
+}
+
+// ── RentEngine prospects ─────────────────────────────────────────────────────
+// Windowed, raw-row. An exploratory unbounded call confirmed this account's
+// RentEngine data only goes back to ~Feb 2026 (3,582 total prospects), so a
+// single ~14-month lookback window comfortably covers all history in one
+// call — no month-by-month backfill chunking needed. Window-replace (delete
+// + re-insert the pulled range) so edits to existing prospects are caught,
+// same pattern as syncGLCompanyCash.
+async function syncReProspects() {
+  const now = new Date();
+  const start = new Date(now.getTime() - 425 * 86400000).toISOString(); // ~14 months back
+  const end = now.toISOString();
+  const prospects = await rentengine.listProspects(start, end);
+  const syncedAt = TS();
+  run("DELETE FROM re_prospects WHERE created_at >= ? AND created_at <= ?", [start, end]);
+  if (prospects.length) {
+    upsertMany("re_prospects", prospects.map((p) => ({
+      id: p.id,
+      name: p.name || null,
+      source: p.source || null,
+      created_at: p.created_at || null,
+      synced_at: syncedAt,
+    })), ["id", "name", "source", "created_at", "synced_at"]);
+  }
+  console.log(`[sync] RentEngine prospects: ${prospects.length}`);
+  return prospects;
+}
+
+// ── RentEngine showings ──────────────────────────────────────────────────────
+// Windowed, raw-row. Depends on re_units already being synced (reads account
+// ids from the local table instead of calling RentEngine again). Same
+// ~14-month lookback + window-replace pattern as syncReProspects.
+async function syncReShowings() {
+  const accountIds = query(`SELECT DISTINCT account_id FROM re_units WHERE account_id IS NOT NULL`).map(r => r.account_id);
+  if (!accountIds.length) {
+    console.log("[sync] RentEngine showings: no account ids in re_units, skipping");
+    return [];
+  }
+  const now = new Date();
+  const start = new Date(now.getTime() - 425 * 86400000).toISOString(); // ~14 months back
+  const end = now.toISOString();
+  const showings = await rentengine.listShowingsForWindow({ accountIds, start, end });
+  const syncedAt = TS();
+  run("DELETE FROM re_showings WHERE created_at >= ? AND created_at <= ?", [start, end]);
+  if (showings.length) {
+    upsertMany("re_showings", showings.map((s) => ({
+      id: s.showing_id,
+      property_address: s.property_address || null,
+      status: s.status || null,
+      scheduled_at: s.scheduled_at || null,
+      started_at: s.started_at || null,
+      created_at: s.created_at || null,
+      synced_at: syncedAt,
+    })), ["id", "property_address", "status", "scheduled_at", "started_at", "created_at", "synced_at"]);
+  }
+  console.log(`[sync] RentEngine showings: ${showings.length}`);
+  return showings;
+}
+
+// ── Applications ─────────────────────────────────────────────────────────────
+// Buildium's /v1/applicants endpoint takes no date params, so this is a full
+// re-pull every sync — but a single unthrottled call, so the live-call COUNT
+// doesn't change from before, only where it runs.
+async function syncApplications() {
+  const applicants = await buildium.listApplicants();
+  const now = TS();
+  const rows = [];
+  for (const a of applicants) {
+    for (const app of (a.Applications || [])) {
+      rows.push({
+        id: app.Id,
+        applicant_id: a.Id,
+        applicant_first_name: a.FirstName || null,
+        applicant_last_name: a.LastName || null,
+        application_number: app.ApplicationNumber || null,
+        status: app.ApplicationStatus || a.Status || null,
+        submitted_at: app.ApplicationSubmittedDateTime || null,
+        synced_at: now,
+      });
+    }
+  }
+  replaceTable("applications", rows, ["id", "applicant_id", "applicant_first_name", "applicant_last_name", "application_number", "status", "submitted_at", "synced_at"]);
+  console.log(`[sync] Applications: ${rows.length} (${applicants.length} applicants)`);
+  return rows;
+}
+
+// ── Lease transactions ────────────────────────────────────────────────────────
+// Consolidates 2 previously-separate live buildium.leaseTransactions() call
+// sites (security-deposit withholding + rent-processing accuracy) into 1
+// synced table. Scope = every currently-Active lease UNION every Past lease
+// with a security deposit whose move-out falls in the trailing ~14 months —
+// a superset covering both consumers' needs, computed from the now-local
+// leases table (no live call to determine scope). Buildium's endpoint takes
+// no date params (full history per call), so this upserts only transactions
+// within the trailing window to keep the local table bounded — the live
+// call itself can't be windowed, only what we persist from it.
+async function syncLeaseTransactions() {
+  const cutoffIso = new Date(Date.now() - 425 * 86400000).toISOString().slice(0, 10); // ~14 months back
+  const leasesInScope = query(
+    `SELECT id FROM leases WHERE status = 'Active' OR (status = 'Past' AND security_deposit > 0 AND to_date >= ?)`,
+    [cutoffIso]
+  );
+  if (!leasesInScope.length) {
+    console.log("[sync] Lease transactions: no leases in scope, skipping");
+    return [];
+  }
+  const now = TS();
+  const txnLists = await pMap(leasesInScope, 5, l => safe(buildium.leaseTransactions(l.id), []));
+  const rows = [];
+  leasesInScope.forEach((l, i) => {
+    for (const t of (txnLists[i] || [])) {
+      const date = t.Date || null;
+      if (date && date < cutoffIso) continue; // bound local growth to the relevant window
+      rows.push({
+        id: t.Id,
+        lease_id: l.id,
+        date,
+        type: t.TransactionTypeEnum || t.TransactionType || null,
+        memo: t.Memo || null,
+        journal_memo: t.Journal?.Memo || null,
+        amount: t.TotalAmount ?? null,
+        synced_at: now,
+      });
+    }
+  });
+  if (rows.length) {
+    upsertMany("lease_transactions", rows, ["id", "lease_id", "date", "type", "memo", "journal_memo", "amount", "synced_at"]);
+  }
+  console.log(`[sync] Lease transactions: ${rows.length} rows across ${leasesInScope.length} leases`);
+  return rows;
+}
+
+// ── Bank reconciliations ─────────────────────────────────────────────────────
+// Depends on bank_accounts already being synced (reads the local table
+// instead of calling Buildium again for the account list). Buildium's
+// reconciliations endpoint takes no date params, so every call already
+// returns full history — running this once per bank account per sync
+// (a handful of accounts) instead of once per dashboard filter click is
+// what stops the 429 storm.
+async function syncReconciliations() {
+  const activeBankAccounts = query(`SELECT id FROM bank_accounts WHERE is_active = 1 AND gl_account_is_active = 1`);
+  if (!activeBankAccounts.length) {
+    console.log("[sync] Reconciliations: no active bank accounts, skipping");
+    return [];
+  }
+  const now = TS();
+  const reconLists = await pMap(activeBankAccounts, 5, b => safe(buildium.listReconciliations(b.id), []));
+  const rows = [];
+  activeBankAccounts.forEach((b, i) => {
+    for (const r of (reconLists[i] || [])) {
+      rows.push({
+        id: r.Id,
+        bank_account_id: b.id,
+        statement_ending_date: r.StatementEndingDate || null,
+        is_finished: r.IsFinished ? 1 : 0,
+        synced_at: now,
+      });
+    }
+  });
+  if (rows.length) {
+    upsertMany("reconciliations", rows, ["id", "bank_account_id", "statement_ending_date", "is_finished", "synced_at"]);
+  }
+  console.log(`[sync] Reconciliations: ${rows.length} rows across ${activeBankAccounts.length} active bank accounts`);
+  return rows;
+}
+
+// ── RentEngine per-unit leasing performance ──────────────────────────────────
+// The only metric where the source API is range-aggregated, not row-level —
+// arbitrary filter windows are reconstructed by summing monthly buckets.
+// This function (wired into the nightly syncAll) only refreshes the CURRENT
+// month's bucket, since it's still accumulating — one call per unit,
+// concurrency 5. Historical complete months are backfilled once via
+// backfillReUnitPerf() below, which is NOT called from syncAll() — it's a
+// separate, deliberately-triggered one-time operation (~840 calls for 60
+// units × 14 months) run manually, not part of the regular sync cadence.
+async function syncReUnitPerf() {
+  const units = query(`SELECT id FROM re_units`);
+  if (!units.length) {
+    console.log("[sync] RentEngine unit perf: no re_units synced yet, skipping");
+    return [];
+  }
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+  const monthEnd = now.toISOString();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+  const syncedAt = TS();
+  const perfList = await pMap(units, 5, u => safe(rentengine.unitLeasingPerformance(u.id, monthStart, monthEnd), null));
+  const statusRows = [], perfRows = [];
+  units.forEach((u, i) => {
+    const p = perfList[i];
+    if (!p) return;
+    statusRows.push({ unit_id: u.id, days_on_market: p.days_on_market ?? null, property_health: p.property_health ?? null, synced_at: syncedAt });
+    perfRows.push({ unit_id: u.id, year, month, total_calls: p.total_calls || 0, outbound_texts: p.outbound_texts || 0, synced_at: syncedAt });
+  });
+  if (statusRows.length) upsertMany("re_unit_status", statusRows, ["unit_id", "days_on_market", "property_health", "synced_at"]);
+  if (perfRows.length) upsertMany("re_unit_monthly_perf", perfRows, ["unit_id", "year", "month", "total_calls", "outbound_texts", "synced_at"]);
+  console.log(`[sync] RentEngine unit perf: ${perfRows.length}/${units.length} units (current month refresh)`);
+  return perfRows;
+}
+
+// One-time backfill for trailing COMPLETE months (excludes the current
+// month, which syncReUnitPerf keeps fresh). Each month is fetched and
+// upserted as its own immutable bucket — once a month is closed it never
+// needs re-pulling. Run manually/deliberately, never from syncAll() —
+// ~840 calls (60 units × 14 months) is a real, one-time cost, not a nightly
+// one. Extra inter-month delay beyond the pMap concurrency=5 cap since this
+// is sustained volume well beyond any other single sync step.
+export async function backfillReUnitPerf(monthsBack = 14) {
+  const units = query(`SELECT id FROM re_units`);
+  if (!units.length) {
+    console.log("[sync] Backfill unit perf: no re_units synced yet");
+    return 0;
+  }
+  const now = new Date();
+  let totalRows = 0;
+  for (let i = 1; i <= monthsBack; i++) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    const year = d.getUTCFullYear();
+    const month = d.getUTCMonth() + 1;
+    const monthStart = d.toISOString();
+    const monthEnd = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999)).toISOString();
+    const syncedAt = TS();
+    const perfList = await pMap(units, 5, u => safe(rentengine.unitLeasingPerformance(u.id, monthStart, monthEnd), null));
+    const rows = [];
+    units.forEach((u, idx) => {
+      const p = perfList[idx];
+      if (!p) return;
+      rows.push({ unit_id: u.id, year, month, total_calls: p.total_calls || 0, outbound_texts: p.outbound_texts || 0, synced_at: syncedAt });
+    });
+    if (rows.length) {
+      upsertMany("re_unit_monthly_perf", rows, ["unit_id", "year", "month", "total_calls", "outbound_texts", "synced_at"]);
+    }
+    totalRows += rows.length;
+    console.log(`[sync] Backfill unit perf ${year}-${String(month).padStart(2, "0")}: ${rows.length}/${units.length} unit-months`);
+    await new Promise(r => setTimeout(r, 300)); // extra pacing beyond concurrency=5
+  }
+  console.log(`[sync] Backfill unit perf complete: ${totalRows} total unit-month rows across ${monthsBack} months`);
+  return totalRows;
+}
+
+// ── Vendors ──────────────────────────────────────────────────────────────────
+// Structural snapshot — no history needed. Coalesces tax/insurance fields
+// once here from Buildium's 3 possible nesting paths (mirrors the exact
+// fallback chain previously repeated on every dashboard build in
+// aggregator.js). Stores ALL vendors the API returns (statuses=Active is
+// unreliable per Buildium — the dashboard re-filters on each vendor's own
+// IsActive flag, same as before, just reading the synced column now).
+async function syncVendors() {
+  const vendors = await buildium.listVendors(["Active"]);
+  const now = TS();
+  replaceTable("vendors", vendors.map((v) => {
+    const tax = v.VendorTaxInformation || v.TaxInformation || v.VendorMessage?.TaxInformation;
+    const ins = v.VendorInsurance || v.VendorMessage?.VendorInsurance;
+    return {
+      id: v.Id,
+      name: v.CompanyName || `${v.FirstName || ""} ${v.LastName || ""}`.trim() || `#${v.Id}`,
+      is_active: v.IsActive !== false ? 1 : 0,
+      category_name: v.Category?.Name || null,
+      tax_payer_id: tax?.TaxPayerId ? String(tax.TaxPayerId).trim() : null,
+      tax_payer_id_type: tax?.TaxPayerIdType || null,
+      include_in_1099: tax?.IncludeIn1099 === true ? 1 : 0,
+      insurance_expiration_date: ins?.ExpirationDate || null,
+      synced_at: now,
+    };
+  }), ["id", "name", "is_active", "category_name", "tax_payer_id", "tax_payer_id_type", "include_in_1099", "insurance_expiration_date", "synced_at"]);
+  console.log(`[sync] Vendors: ${vendors.length}`);
+  return vendors;
+}
+
+// ── RentEngine units ─────────────────────────────────────────────────────────
+// Structural snapshot (id, account_id, address, showing_method, status) — no
+// history needed, always reflects RentEngine's current unit list. Replaces
+// the live rentengine.listUnits() call that previously ran on every
+// dashboard build/filter change.
+async function syncReUnits() {
+  const units = await rentengine.listUnits();
+  const now = TS();
+  replaceTable("re_units", units.map((u) => ({
+    id: u.id,
+    account_id: u.account_id ?? null,
+    formatted_address: u.address?.formatted_address || null,
+    showing_method: u.showing_method || null,
+    status: u.status || null,
+    created_at: u.created_at || null,
+    synced_at: now,
+  })), ["id", "account_id", "formatted_address", "showing_method", "status", "created_at", "synced_at"]);
+  console.log(`[sync] RentEngine units: ${units.length}`);
+  return units;
+}
+
 // ── Owners ───────────────────────────────────────────────────────────────────
 async function syncOwners() {
   const owners = await buildium.listOwners();
@@ -353,10 +664,40 @@ async function syncLeases() {
     from_date: l.LeaseFromDate || null,
     to_date: l.LeaseToDate || null,
     rent: l.AccountDetails?.Rent ?? null,
+    security_deposit: l.AccountDetails?.SecurityDeposit ?? null,
     is_eviction_pending: l.IsEvictionPending ? 1 : 0,
     synced_at: now,
-  })), ["id", "unit_id", "property_id", "status", "type", "from_date", "to_date", "rent", "is_eviction_pending", "synced_at"]);
-  console.log(`[sync] Leases: ${leases.length}`);
+  })), ["id", "unit_id", "property_id", "status", "type", "from_date", "to_date", "rent", "security_deposit", "is_eviction_pending", "synced_at"]);
+
+  // lease_tenants: per-tenant move-in/move-out, from the SAME response's
+  // nested Tenants[]/MoveOutData[] — no extra live call. move_in_date bakes
+  // in the "tenant's own MoveInDate, else the lease's LeaseFromDate" fallback
+  // the old live code applied inline, so downstream SQL doesn't need to
+  // repeat it.
+  const tenantRows = new Map(); // `${leaseId}-${tenantId}` -> row
+  for (const l of leases) {
+    for (const t of (l.Tenants || [])) {
+      if (!t.Id) continue;
+      const key = `${l.Id}-${t.Id}`;
+      tenantRows.set(key, {
+        lease_id: l.Id,
+        tenant_id: t.Id,
+        move_in_date: t.MoveInDate || l.LeaseFromDate || null,
+        move_out_date: null,
+      });
+    }
+    for (const mo of (l.MoveOutData || [])) {
+      if (!mo.TenantId) continue;
+      const key = `${l.Id}-${mo.TenantId}`;
+      const existing = tenantRows.get(key) || { lease_id: l.Id, tenant_id: mo.TenantId, move_in_date: l.LeaseFromDate || null };
+      existing.move_out_date = mo.MoveOutDate || null;
+      tenantRows.set(key, existing);
+    }
+  }
+  clearTable("lease_tenants");
+  upsertMany("lease_tenants", [...tenantRows.values()], ["lease_id", "tenant_id", "move_in_date", "move_out_date"]);
+
+  console.log(`[sync] Leases: ${leases.length} (+ ${tenantRows.size} lease_tenants rows)`);
   return leases;
 }
 
@@ -500,13 +841,17 @@ export async function syncAll(type = "full") {
     await syncGLAccounts().catch((e) => errors.push(`GL accounts: ${e.message}`));
 
     // 2. Core entities (parallel)
-    const [props, units, owners, leases, rentScheds, renewals] = await Promise.all([
+    const [props, units, owners, leases, rentScheds, renewals, reUnits, vendors, bankAccounts, applications] = await Promise.all([
       safe(syncProperties(), []),
       safe(syncUnits(), []),
       safe(syncOwners(), []),
       safe(syncLeases(), []),
       safe(syncRentSchedules(), []),
       safe(syncRenewalHistory(), []),
+      safe(syncReUnits(), []),
+      safe(syncVendors(), []),
+      safe(syncBankAccounts(), []),
+      safe(syncApplications(), []),
     ]);
 
     // 3. Outstanding balances + daily snapshot
@@ -574,6 +919,28 @@ export async function syncAll(type = "full") {
       console.warn("[sync] company-cash failed:", e.message);
     }
 
+    // 6. Reconciliations — needs bank_accounts (step 2) populated first.
+    // pMap-based fan-out, runs on its own (not inside the step-2 Promise.all)
+    // so it doesn't compound concurrency against Buildium with other fan-outs.
+    await safe(syncReconciliations(), []);
+
+    // 6b. Lease transactions — needs leases (step 2) to compute scope.
+    // Runs sequentially after reconciliations (not concurrently) — both are
+    // pMap-based Buildium fan-outs, so running them one at a time avoids
+    // compounding concurrency against Buildium's rate limit.
+    await safe(syncLeaseTransactions(), []);
+
+    // 7. RentEngine prospects — single call, independent of everything else.
+    await safe(syncReProspects(), []);
+
+    // 8. RentEngine showings — needs re_units (step 2) for account ids.
+    await safe(syncReShowings(), []);
+
+    // 9. RentEngine per-unit perf — current month only (pMap fan-out over
+    // units, runs on its own like the other fan-outs above). Historical
+    // months are backfilled separately via backfillReUnitPerf(), never here.
+    await safe(syncReUnitPerf(), []);
+
     totalRecords = query("SELECT (SELECT COUNT(*) FROM units) + (SELECT COUNT(*) FROM leases) + (SELECT COUNT(*) FROM gl_entries) as total")[0]?.total || 0;
 
     const completedAt = TS();
@@ -629,9 +996,5 @@ export async function testGL() {
     };
   });
 }
-
-  // Cross-reference with GL accounts to show types
-  const accounts = await buildium.listGLAccounts();
-  const acctMap = new Map(accounts.map((a) => [a.Id, a]));
 
 

@@ -69,19 +69,23 @@ function isLate(due_at, completed_at) {
 }
 
 // ── Main builder ────────────────────────────────────────────────────────────
-export function buildLeadSimpleKpis() {
+// `win` is the same { start, end } reporting window buildDashboard() computed
+// from the requested period (e.g. the Team Performance tab's own Q1–Q4
+// selector). Every LS query below is scoped to it so switching quarters
+// actually changes these numbers. With no window passed, falls back to the
+// standing trailing-90-day lookback this file has always used.
+export function buildLeadSimpleKpis(win) {
   const now = new Date();
   const todayIso = now.toISOString().slice(0, 10);
 
-  // Trailing 90 days for task metrics
-  const d90 = new Date(now);
-  d90.setDate(d90.getDate() - 90);
-  const d90Iso = d90.toISOString();
-
-  // Trailing 30 days for more recent view
-  const d30 = new Date(now);
-  d30.setDate(d30.getDate() - 30);
-  const d30Iso = d30.toISOString();
+  const winStart = win?.start ? new Date(win.start) : new Date(now.getTime() - 90 * 86400000);
+  const winEnd = win?.end ? new Date(win.end) : now;
+  const winStartIso = winStart.toISOString();
+  const winEndIso = winEnd.toISOString();
+  // Human-readable range used in drilldown titles/notes below — reflects the
+  // actual selected window instead of a hardcoded "90d" once a specific
+  // quarter is requested.
+  const rangeSuffix = win?.start ? `${winStartIso.slice(0, 10)} – ${winEndIso.slice(0, 10)}` : "90d";
 
   // ════════════════════════════════════════════════════════════════════════
   // 1. TASK COMPLETION RATE (Admin Assistant)
@@ -94,9 +98,9 @@ export function buildLeadSimpleKpis() {
            process_type_name, process_name, kind
     FROM ls_tasks
     WHERE completed_at IS NOT NULL
-      AND completed_at >= ?
+      AND completed_at >= ? AND completed_at <= ?
       AND skipped = 0
-  `, [d90Iso]);
+  `, [winStartIso, winEndIso]);
 
   function taskCompletionForEmail(email) {
     const tasks = email
@@ -129,11 +133,14 @@ export function buildLeadSimpleKpis() {
   // ════════════════════════════════════════════════════════════════════════
 
   function workflowComplianceForEmail(email) {
-    // Get all processes that have tasks assigned to this user
+    // Get all processes created within the selected window that have tasks
+    // assigned to this user.
     const processIds = query(`
-      SELECT DISTINCT process_id FROM ls_tasks
-      WHERE assignee_email = ? AND process_id IS NOT NULL
-    `, [email]).map(r => r.process_id);
+      SELECT DISTINCT t.process_id FROM ls_tasks t
+      JOIN ls_processes p ON p.id = t.process_id
+      WHERE t.assignee_email = ? AND t.process_id IS NOT NULL
+        AND p.created_at >= ? AND p.created_at <= ?
+    `, [email, winStartIso, winEndIso]).map(r => r.process_id);
 
     if (processIds.length === 0) return { rate: null, compliant: 0, total: 0, rows: [] };
 
@@ -178,12 +185,12 @@ export function buildLeadSimpleKpis() {
       FROM ls_tasks
       WHERE assignee_email = ?
         AND completed_at IS NOT NULL
-        AND completed_at >= ?
+        AND completed_at >= ? AND completed_at <= ?
         AND (kind = 'email' OR LOWER(description) LIKE '%respond%'
              OR LOWER(description) LIKE '%follow%up%' OR LOWER(description) LIKE '%call%'
              OR LOWER(description) LIKE '%contact%' OR LOWER(description) LIKE '%notify%'
              OR LOWER(description) LIKE '%reach out%' OR LOWER(description) LIKE '%check in%')
-    `, [email, d90Iso]);
+    `, [email, winStartIso, winEndIso]);
 
     if (commTasks.length === 0) return { rate: null, within24: 0, total: 0, avgHours: null, rows: [] };
 
@@ -234,10 +241,10 @@ export function buildLeadSimpleKpis() {
     FROM ls_tasks
     WHERE assignee_email = 'assistant@limehousepm.com'
       AND completed_at IS NOT NULL
-      AND completed_at >= ?
+      AND completed_at >= ? AND completed_at <= ?
       AND (LOWER(description) LIKE '%follow%up%' OR LOWER(description) LIKE '%follow-up%'
            OR LOWER(description) LIKE '%check in%' OR LOWER(description) LIKE '%confirm%')
-  `, [d90Iso]);
+  `, [winStartIso, winEndIso]);
 
   const aaFollowUp = (() => {
     if (aaFollowUpTasks.length === 0) return { rate: null, onTime: 0, total: 0, rows: [] };
@@ -266,8 +273,8 @@ export function buildLeadSimpleKpis() {
     SELECT id, name, created_at, closed_at, time_to_close, stage_name, stage_status
     FROM ls_processes
     WHERE process_type_id = ?
-      AND created_at >= ?
-  `, [PROCESS_TYPES.APPLICATIONS, d90Iso]);
+      AND created_at >= ? AND created_at <= ?
+  `, [PROCESS_TYPES.APPLICATIONS, winStartIso, winEndIso]);
 
   const appProcessingTime = (() => {
     const closed = appProcesses.filter(p => p.closed_at);
@@ -307,8 +314,8 @@ export function buildLeadSimpleKpis() {
     FROM ls_tasks
     WHERE process_type_id = ?
       AND completed_at IS NOT NULL
-      AND completed_at >= ?
-  `, [PROCESS_TYPES.RENEWAL, d90Iso]);
+      AND completed_at >= ? AND completed_at <= ?
+  `, [PROCESS_TYPES.RENEWAL, winStartIso, winEndIso]);
 
   const renewalFollowUp = (() => {
     if (renewalTasks.length === 0) return { rate: null, onTime: 0, total: 0, rows: [] };
@@ -407,8 +414,8 @@ export function buildLeadSimpleKpis() {
     FROM ls_tasks
     WHERE process_type_id = ?
       AND completed_at IS NOT NULL
-      AND completed_at >= ?
-  `, [PROCESS_TYPES.MOVE_IN, d90Iso]);
+      AND completed_at >= ? AND completed_at <= ?
+  `, [PROCESS_TYPES.MOVE_IN, winStartIso, winEndIso]);
 
   const propertyReadiness = (() => {
     const apmTasks = moveInTasks.filter(t => t.assignee_email === "addison@limehousepm.com");
@@ -443,9 +450,9 @@ export function buildLeadSimpleKpis() {
     FROM ls_tasks
     WHERE process_type_id = ?
       AND completed_at IS NOT NULL
-      AND completed_at >= ?
+      AND completed_at >= ? AND completed_at <= ?
     ORDER BY process_id, due_at ASC
-  `, [PROCESS_TYPES.APPLICATIONS, d90Iso]);
+  `, [PROCESS_TYPES.APPLICATIONS, winStartIso, winEndIso]);
 
   const applicantResponse = (() => {
     // Group by process_id, take first completed task per process
@@ -507,7 +514,7 @@ export function buildLeadSimpleKpis() {
 
   const lsKpis = {
     asOf: todayIso,
-    window: "90 days",
+    window: win?.start ? rangeSuffix : "90 days",
     roles: [
       {
         abbrev: "AA",
@@ -640,25 +647,25 @@ export function buildLeadSimpleKpis() {
 
   const lsDrilldowns = {
     lsTaskCompletion: {
-      title: "Task Completion Rate -- Administrative Assistant (90d)",
+      title: `Task Completion Rate -- Administrative Assistant (${rangeSuffix})`,
       cols: ["Task", "Process", "Due", "Completed", "On Time"],
       rows: aaTaskCompletion.rows.map(r => [
         r.description, r.process, fmtDate(r.due_at), fmtDate(r.completed_at), yesNo(r.on_time),
       ]),
       summary: `${aaTaskCompletion.rate ?? "n/a"}% on time (${aaTaskCompletion.onTime}/${aaTaskCompletion.total}) -- target >= 95%`,
-      note: "Tasks assigned to Belinda (assistant@limehousepm.com) completed in the trailing 90 days. On time = completed on or before the due date's calendar day (ET).",
+      note: `Tasks assigned to Belinda (assistant@limehousepm.com) completed in the selected window (${rangeSuffix}). On time = completed on or before the due date's calendar day (ET).`,
     },
     lsWorkflowCompliance: {
-      title: "Workflow Compliance -- Administrative Assistant (90d)",
+      title: `Workflow Compliance -- Administrative Assistant (${rangeSuffix})`,
       cols: ["Process", "Type", "Tasks", "Skipped", "Late", "Incomplete", "Compliant"],
       rows: aaWorkflowCompliance.rows.map(r => [
         r.process, r.type, String(r.taskCount), String(r.skipped), String(r.late), String(r.incomplete), yesNo(r.compliant),
       ]),
       summary: `${aaWorkflowCompliance.rate ?? "n/a"}% compliant (${aaWorkflowCompliance.compliant}/${aaWorkflowCompliance.total}) -- target 100%`,
-      note: "Processes with tasks assigned to Belinda. Compliant = all tasks completed on time, none skipped.",
+      note: `Processes created in the selected window (${rangeSuffix}) with tasks assigned to Belinda. Compliant = all tasks completed on time, none skipped.`,
     },
     lsResidentResponseAA: {
-      title: "Resident Response Time -- Admin Assistant (90d)",
+      title: `Resident Response Time -- Admin Assistant (${rangeSuffix})`,
       cols: ["Task", "Kind", "Start", "Completed", "Hours", "Within 24h"],
       rows: aaResponseTime.rows.map(r => [
         r.description, r.kind, fmtDate(r.start), fmtDate(r.completed_at), String(r.hours), r.within24 == null ? "n/a" : yesNo(r.within24),
@@ -667,7 +674,7 @@ export function buildLeadSimpleKpis() {
       note: "Communication tasks (emails, follow-ups, calls) assigned to Belinda. Hours measured from due_at to completed_at, adjusted for business hours (approx).",
     },
     lsResidentResponseAPM: {
-      title: "Resident Response Time -- Asst. Property Manager (90d)",
+      title: `Resident Response Time -- Asst. Property Manager (${rangeSuffix})`,
       cols: ["Task", "Kind", "Start", "Completed", "Hours", "Within 24h"],
       rows: apmResponseTime.rows.map(r => [
         r.description, r.kind, fmtDate(r.start), fmtDate(r.completed_at), String(r.hours), r.within24 == null ? "n/a" : yesNo(r.within24),
@@ -676,7 +683,7 @@ export function buildLeadSimpleKpis() {
       note: "Communication tasks assigned to Addison (addison@limehousepm.com).",
     },
     lsFollowUpSupport: {
-      title: "Admin Follow-Up Support (90d)",
+      title: `Admin Follow-Up Support (${rangeSuffix})`,
       cols: ["Task", "Process", "Due", "Completed", "On Time"],
       rows: aaFollowUp.rows.map(r => [
         r.description, r.process, fmtDate(r.due_at), fmtDate(r.completed_at), yesNo(r.on_time),
@@ -685,7 +692,7 @@ export function buildLeadSimpleKpis() {
       note: "Tasks containing 'follow up', 'check in', or 'confirm' assigned to Belinda.",
     },
     lsApplicantResponse: {
-      title: "Applicant Response Timeliness (90d)",
+      title: `Applicant Response Timeliness (${rangeSuffix})`,
       cols: ["Application", "First Task", "Hours to Complete", "Within 24h", "Assignee"],
       rows: applicantResponse.rows.map(r => [
         r.process, r.description, String(r.hours), yesNo(r.within24), r.assignee,
@@ -694,7 +701,7 @@ export function buildLeadSimpleKpis() {
       note: "First completed task per Applications Process. No Leasing Specialist assigned -- showing all assignees.",
     },
     lsAppProcessingTime: {
-      title: "Application Processing Time (90d)",
+      title: `Application Processing Time (${rangeSuffix})`,
       cols: ["Application", "Created", "Closed", "Hours", "Within 48h"],
       rows: appProcessingTime.rows.map(r => [
         r.name, fmtDate(r.created_at), fmtDate(r.closed_at), String(r.hours), yesNo(r.within48),
@@ -703,7 +710,7 @@ export function buildLeadSimpleKpis() {
       note: "Applications Process: created_at to closed_at. No Leasing Specialist assigned.",
     },
     lsRenewalFollowUp: {
-      title: "Renewal Follow-Up Timeliness (90d)",
+      title: `Renewal Follow-Up Timeliness (${rangeSuffix})`,
       cols: ["Task", "Process", "Stage", "Due", "Completed", "On Time", "Assignee"],
       rows: renewalFollowUp.rows.map(r => [
         r.description, r.process, r.stage, fmtDate(r.due_at), fmtDate(r.completed_at), yesNo(r.on_time), r.assignee,
@@ -721,7 +728,7 @@ export function buildLeadSimpleKpis() {
       note: "Lease Renewal Processes in trailing 12 months. Rate = renewed / decided, where 'decided' excludes still-in-progress processes (e.g. Send Lease, Upcoming). 'Renewed' = a completed Lease Renewed outcome; non-renewal outcomes (owner/tenant non-renewal, owner terminating management, owner relisting, owner selling) count as not renewed. Combine with Buildium lease data for full metric.",
     },
     lsPropertyReadiness: {
-      title: "Property Readiness -- Move In Tasks (90d)",
+      title: `Property Readiness -- Move In Tasks (${rangeSuffix})`,
       cols: ["Task", "Process", "Due", "Completed", "On Time", "Assignee"],
       rows: propertyReadiness.rows.map(r => [
         r.description, r.process, fmtDate(r.due_at), fmtDate(r.completed_at), yesNo(r.on_time), r.assignee,

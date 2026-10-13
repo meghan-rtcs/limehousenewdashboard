@@ -107,6 +107,23 @@ function migrate(db) {
       synced_at TEXT
     );
 
+    -- Per-tenant move-in/move-out dates per lease (refreshed alongside leases
+    -- every sync, from the same Buildium listAllLeases() response — no extra
+    -- live call). Feeds the tenancy-length calc (renewal-chaining needs the
+    -- tenant's FIRST move-in across every lease they appear on for a unit;
+    -- move_in_date is stored pre-resolved with the "tenant MoveInDate, else
+    -- lease LeaseFromDate" fallback already applied, same as the old live
+    -- code did inline). move_out_date stays NULL for tenants still in place.
+    CREATE TABLE IF NOT EXISTS lease_tenants (
+      lease_id INTEGER NOT NULL,
+      tenant_id INTEGER NOT NULL,
+      move_in_date TEXT,
+      move_out_date TEXT,
+      PRIMARY KEY (lease_id, tenant_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_lease_tenants_tenant ON lease_tenants(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_lease_tenants_moveout ON lease_tenants(move_out_date);
+
     -- Rent schedules (refreshed each sync)
     CREATE TABLE IF NOT EXISTS rent_schedules (
       id INTEGER PRIMARY KEY,
@@ -210,6 +227,168 @@ function migrate(db) {
       updated_at TEXT
     );
 
+    -- Applications (refreshed each sync) — Buildium's /v1/applicants
+    -- endpoint takes no date params, so this is a full re-pull every sync;
+    -- one row per Applications[] entry per applicant (an applicant can have
+    -- multiple applications). submitted_at drives the windowed
+    -- "applications submitted" flow metric.
+    CREATE TABLE IF NOT EXISTS applications (
+      id INTEGER PRIMARY KEY,
+      applicant_id INTEGER,
+      applicant_first_name TEXT,
+      applicant_last_name TEXT,
+      application_number TEXT,
+      status TEXT,
+      submitted_at TEXT,
+      synced_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_applications_submitted ON applications(submitted_at);
+
+    -- Vendors (refreshed each sync) — structural snapshot, no history.
+    -- Tax/insurance fields are coalesced once here from Buildium's 3
+    -- possible nesting paths (TaxInformation / VendorTaxInformation /
+    -- VendorMessage.TaxInformation, similarly for VendorInsurance) so the
+    -- dashboard build no longer has to repeat that fallback chain.
+    CREATE TABLE IF NOT EXISTS vendors (
+      id INTEGER PRIMARY KEY,
+      name TEXT,
+      is_active INTEGER DEFAULT 1,
+      category_name TEXT,
+      tax_payer_id TEXT,
+      tax_payer_id_type TEXT,
+      include_in_1099 INTEGER DEFAULT 0,
+      insurance_expiration_date TEXT,
+      synced_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_vendors_category ON vendors(category_name);
+
+    -- Bank accounts (refreshed each sync) — structural snapshot, no history.
+    CREATE TABLE IF NOT EXISTS bank_accounts (
+      id INTEGER PRIMARY KEY,
+      name TEXT,
+      gl_account_name TEXT,
+      gl_account_is_active INTEGER DEFAULT 1,
+      balance REAL,
+      is_active INTEGER DEFAULT 1,
+      synced_at TEXT
+    );
+
+    -- Bank reconciliations — raw rows, keyed by Buildium's own reconciliation
+    -- Id (same convention as every other Buildium-backed table here), so
+    -- INSERT OR REPLACE naturally captures an IsFinished flip on a
+    -- previously-open statement when re-synced. Buildium's reconciliations
+    -- endpoint takes no date params (full history per call), so this is a
+    -- full re-pull every sync. This table replacing the old per-request live
+    -- call is the fix for the 429 incident.
+    CREATE TABLE IF NOT EXISTS reconciliations (
+      id INTEGER PRIMARY KEY,
+      bank_account_id INTEGER NOT NULL,
+      statement_ending_date TEXT,
+      is_finished INTEGER DEFAULT 0,
+      synced_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_recon_bank_date ON reconciliations(bank_account_id, statement_ending_date);
+
+    -- RentEngine prospects — raw rows, windowed by created_at. RentEngine
+    -- data for this account only goes back to ~Feb 2026 (confirmed via an
+    -- exploratory unbounded call), so backfill is small — no month-by-month
+    -- chunking needed, a single wide-range call covers all history.
+    CREATE TABLE IF NOT EXISTS re_prospects (
+      id INTEGER PRIMARY KEY,
+      name TEXT,
+      source TEXT,
+      created_at TEXT NOT NULL,
+      synced_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_re_prospects_created ON re_prospects(created_at);
+
+    -- Lease transactions — raw rows, consolidates what used to be 2
+    -- separate live buildium.leaseTransactions() call sites (security-deposit
+    -- withholding calc + rent-processing accuracy calc) into 1 synced table.
+    -- Buildium's endpoint takes no date params (full history per lease per
+    -- call), so syncLeaseTransactions() bounds what it UPSERTS to a trailing
+    -- window rather than storing everything forever. "type" is pre-resolved
+    -- from TransactionTypeEnum||TransactionType at sync time; memo and
+    -- journal_memo are kept as 2 separate columns because the two
+    -- consumers check different combinations of them (SD calc: journal_memo
+    -- only; rent-processing NSF calc: memo+journal_memo concatenated) — do
+    -- not collapse these into one column.
+    CREATE TABLE IF NOT EXISTS lease_transactions (
+      id INTEGER PRIMARY KEY,
+      lease_id INTEGER NOT NULL,
+      date TEXT,
+      type TEXT,
+      memo TEXT,
+      journal_memo TEXT,
+      amount REAL,
+      synced_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_lease_txn_lease ON lease_transactions(lease_id);
+    CREATE INDEX IF NOT EXISTS idx_lease_txn_date ON lease_transactions(date);
+
+    -- RentEngine showings — raw rows, windowed by created_at (confirmed via
+    -- an exploratory call that real rows never populate scheduled_at/
+    -- started_at — the aggregator's existing fallback chain already falls
+    -- through to created_at in practice; both columns are kept only for
+    -- forward-compat with that fallback expression). PK is RentEngine's own
+    -- showing_id field (confirmed stable/unique), NOT a generic "id".
+    CREATE TABLE IF NOT EXISTS re_showings (
+      id INTEGER PRIMARY KEY,
+      property_address TEXT,
+      status TEXT,
+      scheduled_at TEXT,
+      started_at TEXT,
+      created_at TEXT,
+      synced_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_re_showings_date ON re_showings(created_at);
+
+    -- RentEngine per-unit structural status (days_on_market, property_health)
+    -- — as-of-today, NOT windowed, so this is a plain latest-known snapshot
+    -- (one row per unit, overwritten every sync), refreshed alongside the
+    -- current-month bucket below.
+    CREATE TABLE IF NOT EXISTS re_unit_status (
+      unit_id INTEGER PRIMARY KEY,
+      days_on_market INTEGER,
+      property_health TEXT,
+      synced_at TEXT
+    );
+
+    -- RentEngine per-unit monthly performance buckets (calls, texts) — the
+    -- only metric in this file where the source API itself is
+    -- range-aggregated, not row-level, so arbitrary filter windows are
+    -- reconstructed by SUMming whichever (year,month) buckets overlap the
+    -- requested window. Complete past months are immutable once captured
+    -- (backfillReUnitPerf); the current month's row is refreshed every sync
+    -- since it's still accumulating (syncReUnitPerf) — same
+    -- "accumulate current period, freeze past periods" invariant as
+    -- team_perf_snapshots. applications_requested/applications_submitted
+    -- from this endpoint are confirmed dead downstream — not stored.
+    CREATE TABLE IF NOT EXISTS re_unit_monthly_perf (
+      unit_id INTEGER NOT NULL,
+      year INTEGER NOT NULL,
+      month INTEGER NOT NULL,
+      total_calls INTEGER DEFAULT 0,
+      outbound_texts INTEGER DEFAULT 0,
+      synced_at TEXT,
+      PRIMARY KEY (unit_id, year, month)
+    );
+    CREATE INDEX IF NOT EXISTS idx_re_unit_perf_ym ON re_unit_monthly_perf(year, month);
+
+    -- RentEngine units (refreshed each sync) — structural snapshot, no
+    -- history needed. account_id/showing_method/status drive the showings
+    -- completion split and the on-market/health tiles.
+    CREATE TABLE IF NOT EXISTS re_units (
+      id INTEGER PRIMARY KEY,
+      account_id INTEGER,
+      formatted_address TEXT,
+      showing_method TEXT,
+      status TEXT,
+      created_at TEXT,
+      synced_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_re_units_account ON re_units(account_id);
+
     -- Sync log
     CREATE TABLE IF NOT EXISTS sync_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -227,6 +406,10 @@ function migrate(db) {
   const cols = db.prepare("PRAGMA table_info(gl_accounts)").all().map(c => c.name);
   if (!cols.includes("parent_id")) {
     db.exec("ALTER TABLE gl_accounts ADD COLUMN parent_id INTEGER");
+  }
+  const leaseCols = db.prepare("PRAGMA table_info(leases)").all().map(c => c.name);
+  if (!leaseCols.includes("security_deposit")) {
+    db.exec("ALTER TABLE leases ADD COLUMN security_deposit REAL");
   }
 }
 
